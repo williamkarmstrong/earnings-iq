@@ -23,7 +23,7 @@ from nlp import analyse_sentiment
 from multimodal import analyse_multimodal
 from insights import generate_insights
 
-st.set_page_config(page_title="Sentira: Earnings Intelligence", layout="wide")
+st.set_page_config(page_title="EarningsIQ", layout="wide")
 
 @st.cache_data
 def get_analysis(ticker, q, yr):

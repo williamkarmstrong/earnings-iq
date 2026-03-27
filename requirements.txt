@@ -8,3 +8,5 @@ transformers
 spacy
 numpy
 python-dotenv
+openai
+openai-whisper
