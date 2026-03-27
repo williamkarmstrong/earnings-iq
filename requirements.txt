@@ -1,0 +1,10 @@
+streamlit
+pandas
+plotly
+requests
+whisper
+librosa
+transformers
+spacy
+numpy
+python-dotenv
