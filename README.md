@@ -20,12 +20,14 @@ The proposed solution allows users to interact with an AI-powered analysis dashb
 - Pandas for data processing
   
 ## Installation
+In your terminal run the following commands
 1. git clone https://github.com/williamkarmstrong/earnings-iq
 2. cd earnings-iq
 3. pip install -r requirements.txt
 
 ## Usage
-1. streamlit run app.py
+In your terminal run the command `streamlit run app/app.py` which will automatically open the the app in a browser at http://localhost:8501
 
 ## Live Demo
 https://earningsiq.streamlit.app
+(Note for team: this will update automatically when you push changes)
