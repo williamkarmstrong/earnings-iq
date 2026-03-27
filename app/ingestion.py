@@ -9,6 +9,12 @@ Think of this as the "data input" stage of the system.
 """
 
 import requests
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
 def fetch_earnings_data(ticker, period, year):
     pass
