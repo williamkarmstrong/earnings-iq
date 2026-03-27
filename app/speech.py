@@ -9,3 +9,6 @@ Output: clean transcript + speaker segments
 """
 
 import whisper
+
+def analyse_audio_features(audio_path):
+    pass

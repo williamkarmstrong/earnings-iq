@@ -10,3 +10,6 @@ This helps understand what is being said in the earnings call.
 
 from transformers import pipeline
 import spacy
+
+def analyse_sentiment(text):
+    pass

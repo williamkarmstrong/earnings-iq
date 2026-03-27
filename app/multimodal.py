@@ -12,3 +12,5 @@ by merging both sources into a single score.
 import numpy as np
 import pandas as pd
 
+def analyse_multimodal(text_sentiment, audio_features):
+    pass

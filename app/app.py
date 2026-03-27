@@ -17,10 +17,10 @@ import pandas as pd
 import plotly.express as px
 
 # Import our custom modules
-from ingestion import fetch_earnings_data
-from speech import analyze_audio_features
-from nlp import analyze_sentiment
-from multimodal import analyze_multimodal
+from ingestion import fetch_earnings_data, fetch_audio_url
+from speech import analyse_audio_features
+from nlp import analyse_sentiment
+from multimodal import analyse_multimodal
 from insights import generate_insights
 
 st.set_page_config(page_title="Sentira: Earnings Intelligence", layout="wide")
