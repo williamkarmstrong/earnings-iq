@@ -8,6 +8,7 @@ This file is responsible for collecting earnings call data.
 Think of this as the "data input" stage of the system.
 """
 
+import streamlit as st
 import requests
 import yt_dlp
 from dotenv import load_dotenv
@@ -15,7 +16,8 @@ import os
 
 load_dotenv()
 
-ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+ALPHA_VANTAGE_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
+#ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 #ALPHA_VANTAGE_API_KEY = "" # To not waste API credits during testing
 
 def fetch_backup_transcript(ticker, period, year):
