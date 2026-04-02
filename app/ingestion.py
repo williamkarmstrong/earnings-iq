@@ -113,10 +113,20 @@ def fetch_audio(ticker, period, year):
             return None, "Could not find a valid video URL."
             
         outtmpl = os.path.join(cache_dir, f"{filename}.%(ext)s")
+
         ydl_opts_dl = {
             'format': 'bestaudio/best',
             'outtmpl': outtmpl,
             'quiet': True,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0',
+            },
+            'force_ipv4': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web']
+                }
+            }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl_dl:
