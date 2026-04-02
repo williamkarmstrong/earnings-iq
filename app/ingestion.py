@@ -118,15 +118,6 @@ def fetch_audio(ticker, period, year):
             'format': 'bestaudio/best',
             'outtmpl': outtmpl,
             'quiet': True,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0',
-            },
-            'force_ipv4': True,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'web']
-                }
-            }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl_dl:
