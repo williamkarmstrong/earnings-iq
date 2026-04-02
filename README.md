@@ -24,6 +24,7 @@ In your terminal run the following commands
 1. git clone https://github.com/williamkarmstrong/earnings-iq
 2. cd earnings-iq
 3. pip install -r requirements.txt
+4. create a .streamlit/secrets.toml file and using .streamlit/secrets.toml.example as a template, add your own API keys
 
 ## Usage
 In your terminal run the command `streamlit run app/app.py` which will automatically open the the app in a browser at http://localhost:8501
@@ -31,3 +32,7 @@ In your terminal run the command `streamlit run app/app.py` which will automatic
 ## Live Demo
 https://earningsiq.streamlit.app
 (Note for team: this will update automatically when you push changes)
+
+## Notes
+`yt dlp` is used to download audio from YouTube, however it will not work
+on the cloud hosted domain, due to YouTube only allowing downloads locally.

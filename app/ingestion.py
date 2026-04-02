@@ -17,7 +17,6 @@ import os
 load_dotenv()
 
 ALPHA_VANTAGE_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
-#ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 #ALPHA_VANTAGE_API_KEY = "" # To not waste API credits during testing
 
 def fetch_backup_transcript(ticker, period, year):
