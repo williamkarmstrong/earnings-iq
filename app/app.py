@@ -19,7 +19,7 @@ import yfinance as yf
 import time
 
 # Import our custom modules 
-from ingestion import fetch_earnings_data, fetch_audio_url
+from ingestion import fetch_backup_transcript, fetch_audio
 from speech import analyse_audio_features
 from nlp import analyse_sentiment
 from multimodal import analyse_multimodal
@@ -85,7 +85,7 @@ if run:
     progress_bar.progress(25)
 
     # Attempt to fetch audio via yt-dlp first
-    audio_path, audio_result = fetch_audio_url(ticker, period, year)
+    audio_path, audio_result = fetch_audio(ticker, period, year)
     
     transcript_text = None
     if audio_path:
@@ -94,15 +94,15 @@ if run:
         progress_bar.progress(50)
     else:
         st.warning(f"{audio_result} Falling back to Alpha Vantage API for text transcript...")
-        transcript_text, transcript_error = fetch_earnings_data(ticker, period, year)
+        transcript_text, transcript_error = fetch_backup_transcript(ticker, period, year)
         if transcript_text:
             st.success("Successfully fetched text transcript.")
             status_text.text(f"Processing audio and transcript...")
             progress_bar.progress(50)        
         else:
             st.error(f"Failed to fetch both audio and text transcript. {transcript_error}")
-            st.stop()
-    
+            st.stop() 
+
     # Clear processing UI
     status_text.empty()
     progress_bar.empty()

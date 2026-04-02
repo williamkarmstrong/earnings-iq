@@ -18,7 +18,7 @@ load_dotenv()
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 #ALPHA_VANTAGE_API_KEY = "" # To not waste API credits during testing
 
-def fetch_earnings_data(ticker, period, year):
+def fetch_backup_transcript(ticker, period, year):
     """Fallback: fetch text transcript from Alpha Vantage API or return error message."""
     if not ALPHA_VANTAGE_API_KEY:
         return None, "No Alpha Vantage API key found."
@@ -37,7 +37,7 @@ def fetch_earnings_data(ticker, period, year):
     except Exception as e:
         return None, f"Error fetching from Alpha Vantage: {e}"
 
-def fetch_audio_url(ticker, period, year):
+def fetch_audio(ticker, period, year):
     """Attempt to fetch from local cache, otherwise search, score and download the best match."""
     cache_dir = "cache"
     os.makedirs(cache_dir, exist_ok=True)
@@ -49,7 +49,7 @@ def fetch_audio_url(ticker, period, year):
     for ext in ['.m4a', '.mp3', '.webm', '.wav', '.opus', '.ogg']:
         cached_file = expected_path_base + ext
         if os.path.exists(cached_file):
-            return cached_file, None
+            return cached_file, f"cache/{filename}{ext}"
 
     def score_video(entry):
         # Ensure duration is over 25 mins to filter out short summaries/interviews
