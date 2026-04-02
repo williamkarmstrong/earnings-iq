@@ -15,9 +15,10 @@ This file connects all parts of the system together and runs the full pipeline:
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import yfinance as yf
 import time
 
-# Import our custom modules (Commented out for now to avoid dependency issues during UI verification)
+# Import our custom modules 
 from ingestion import fetch_earnings_data, fetch_audio_url
 from speech import analyse_audio_features
 from nlp import analyse_sentiment
@@ -25,6 +26,14 @@ from multimodal import analyse_multimodal
 from insights import generate_insights
 
 st.set_page_config(page_title="EarningsIQ", layout="wide")
+
+@st.cache_data
+def is_valid_ticker(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.fast_info['lastPrice'] is not None
+    except Exception:
+        return False
 
 @st.cache_data
 def get_analysis(ticker, q, yr):
@@ -62,25 +71,37 @@ st.title("📈 EarningsIQ | Multimodal Earnings Analysis")
 with st.sidebar:
     ticker = st.text_input("Ticker", "AAPL")
     period = st.selectbox("Quarter", ["Q1", "Q2", "Q3", "Q4"])
-    year = st.slider("Year", 2020, 2026, 2024)
+    year = st.slider("Year", 2011, 2026, 2018)
     run = st.button("Analyze Call")
 
 if run:
-    # Simulated processing with a loading bar
+    if not is_valid_ticker(ticker):
+        st.error(f"❌ '{ticker}' is not a valid stock ticker. Please try again.")
+        st.stop()
+        
     progress_bar = st.progress(0)
     status_text = st.empty()
+    status_text.text(f"Starting ingestion for {ticker} {period} {year}...")
+    progress_bar.progress(25)
+
+    # Attempt to fetch audio via yt-dlp first
+    audio_path, audio_result = fetch_audio_url(ticker, period, year)
     
-    stages = [
-        ("Fetching earnings data...", 25),
-        ("Processing audio and transcript...", 50),
-        ("Analysing sentiment and vocal tone...", 75),
-        ("Generating multimodal insights...", 100)
-    ]
-    
-    for status, percentage in stages:
-        status_text.text(status)
-        time.sleep(0.5)  # Simulate work
-        progress_bar.progress(percentage)
+    transcript_text = None
+    if audio_path:
+        st.success(f"Successfully fetched audio from: {audio_result}")
+        status_text.text(f"Processing audio and transcript...")
+        progress_bar.progress(50)
+    else:
+        st.warning(f"{audio_result} Falling back to Alpha Vantage API for text transcript...")
+        transcript_text, transcript_error = fetch_earnings_data(ticker, period, year)
+        if transcript_text:
+            st.success("Successfully fetched text transcript.")
+            status_text.text(f"Processing audio and transcript...")
+            progress_bar.progress(50)        
+        else:
+            st.error(f"Failed to fetch both audio and text transcript. {transcript_error}")
+            st.stop()
     
     # Clear processing UI
     status_text.empty()
