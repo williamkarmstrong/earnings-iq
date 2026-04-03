@@ -20,10 +20,7 @@ import time
 
 # Import our custom modules 
 from ingestion import fetch_backup_transcript, fetch_audio
-from speech import analyse_audio_features
-from nlp import analyse_sentiment
-from multimodal import analyse_multimodal
-from insights import generate_insights
+from speech import transcribe_audio, map_speakers, tokenize_audio_text
 
 st.set_page_config(page_title="EarningsIQ", layout="wide")
 
@@ -88,10 +85,29 @@ if run:
     audio_path, audio_result = fetch_audio(ticker, period, year)
     
     transcript_text = None
+
     if audio_path:
-        st.success(f"Successfully fetched audio from: {audio_result}")
-        status_text.text(f"Processing audio and transcript...")
+        st.success(f"Successfully fetched {audio_result}")
         progress_bar.progress(50)
+
+        # Transcribe audio
+        status_text.text("Transcribing audio...")
+        progress_bar.progress(60)
+        transcription = transcribe_audio(audio_path)
+        st.write(transcription)
+        
+        # Map speakers
+        status_text.text("Mapping speakers...")
+        progress_bar.progress(70)
+        mapped_segments = map_speakers(audio_path, transcription)
+        st.write(mapped_segments)
+        
+        # Tokenize text
+        status_text.text("Tokenizing text...")
+        progress_bar.progress(80)
+        tokens = tokenize_audio_text(transcription["text"])
+        st.write(tokens)
+        
     else:
         st.warning(f"{audio_result} Falling back to Alpha Vantage API for text transcript...")
         transcript_text, transcript_error = fetch_backup_transcript(ticker, period, year)
@@ -101,8 +117,8 @@ if run:
             progress_bar.progress(50)        
         else:
             st.error(f"Failed to fetch both audio and text transcript. {transcript_error}")
-            st.stop() 
-
+            st.stop()
+    
     # Clear processing UI
     status_text.empty()
     progress_bar.empty()
