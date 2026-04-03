@@ -115,6 +115,15 @@ def fetch_audio(ticker, period, year):
 
         ydl_opts_dl = {
             'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+            }],
+            'postprocessor_args': [
+                '-ac', '1',        # mono
+                '-ar', '16000',    # 16kHz
+                '-f', 'wav'
+            ],
             'outtmpl': outtmpl,
             'quiet': True,
         }
