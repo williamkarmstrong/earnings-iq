@@ -94,19 +94,16 @@ if run:
         status_text.text("Transcribing audio...")
         progress_bar.progress(60)
         transcription = transcribe_audio(audio_path)
-        st.write(transcription)
         
         # Map speakers
         status_text.text("Mapping speakers...")
         progress_bar.progress(70)
         mapped_segments = map_speakers(audio_path, transcription)
-        st.write(mapped_segments)
         
         # Tokenize text
         status_text.text("Tokenizing text...")
         progress_bar.progress(80)
         tokens = tokenize_audio_text(transcription["text"])
-        st.write(tokens)
         
     else:
         st.warning(f"{audio_result} Falling back to Alpha Vantage API for text transcript...")
