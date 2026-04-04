@@ -40,6 +40,7 @@ def fetch_backup_transcript(ticker, period, year):
 
 def process_transcript(transcript):
     processed_transcript = []
+    id_counter = 0
 
     for segment in transcript:
         speaker = segment['speaker']
@@ -47,15 +48,21 @@ def process_transcript(transcript):
         content = segment['content']
 
         segmented_content = content.split(". ")
+        prepared_or_qa = "qa" if speaker_title == "Analyst" else "prepared"
 
         for sentence in segmented_content:
             processed_transcript.append( {
+                "id": id_counter,
                 "speaker": speaker,
-                "speaker_title": speaker_title,
+                "role": speaker_title,
                 "content": sentence,
-                "sentiment": "",
-                "prepared_or_qa": ""
+                "start": None,
+                "end": None,
+                "source": "alpha_vantage",
+                "type": prepared_or_qa,
+                "sentiment": None
             })
+            id_counter += 1
                 
     return processed_transcript
         

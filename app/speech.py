@@ -60,6 +60,9 @@ def map_speakers(audio_path, transcription_result):
     segments = transcription_result.get("segments", [])
     mapped_segments = []
     
+    in_qa = False
+    speaker_roles = {}
+    
     for segment in segments:
         segment_start = segment["start"]
         segment_end = segment["end"]
@@ -80,8 +83,55 @@ def map_speakers(audio_path, transcription_result):
         else:
             best_speaker = "UNKNOWN"
             
-        segment["speaker"] = best_speaker
-        mapped_segments.append(segment)
+        text_lower = segment["text"].lower()
+        
+        # Roughly determine the type of the segment
+        qa_triggers = ["open the line for questions", "open the call for questions", 
+                       "first question", "question-and-answer", "q&a", "take questions"]
+        if not in_qa and any(phrase in text_lower for phrase in qa_triggers):
+            in_qa = True
+            
+        segment_type = "qa" if in_qa else "prepared"
+
+        # Roughly determine the role of the speaker
+        if best_speaker not in speaker_roles:
+            # Assume SPEAKER_01 is usually the operator in pyannote diarization
+            if best_speaker == "SPEAKER_01":
+                speaker_roles[best_speaker] = "Operator"
+            elif best_speaker == "SPEAKER_00":
+                speaker_roles[best_speaker] = "CEO"
+            elif not in_qa:
+                # Speakers in the prepared remarks are usually executives
+                speaker_roles[best_speaker] = "CFO"
+            else:
+                # New speaker in Q&A: if they ask a question or use introductory pleasantries, likely an analyst
+                analyst_cues = ["?", "question", "thanks", "hi ", "hello", "morning", "afternoon"]
+                if any(cue in text_lower for cue in analyst_cues):
+                    speaker_roles[best_speaker] = "Analyst"
+                else:
+                    # Otherwise, it might be an executive answering a question for the first time
+                    speaker_roles[best_speaker] = "Executive"
+                
+        # Update analyst role dynamically if they ask explicit questions later
+        if in_qa and speaker_roles.get(best_speaker) == "Executive":
+            if "my question" in text_lower or "thanks for taking" in text_lower:
+                speaker_roles[best_speaker] = "Analyst"
+
+        role = speaker_roles.get(best_speaker, "unknown")
+
+        processed_segment = {
+            "id": segment["id"],
+            "speaker": best_speaker,
+            "role": role,
+            "content": segment["text"],
+            "start": segment["start"],
+            "end": segment["end"],
+            "source": "audio",
+            "type": segment_type,
+            "sentiment": None
+        }
+
+        mapped_segments.append(processed_segment)
         
     return mapped_segments
 
