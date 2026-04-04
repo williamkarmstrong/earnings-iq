@@ -30,13 +30,36 @@ def fetch_backup_transcript(ticker, period, year):
         if response.status_code == 200:
             data = response.json()
             if "transcript" in data:
-                return data["transcript"], None
+                return process_transcript(data["transcript"]), None
             else:
                 return None, f"Alpha Vantage returned no transcript"
         else:
             return None, f"Alpha Vantage request failed with status code: {response.status_code}"
     except Exception as e:
         return None, f"Error fetching from Alpha Vantage: {e}"
+
+def process_transcript(transcript):
+    processed_transcript = []
+
+    for segment in transcript:
+        speaker = segment['speaker']
+        speaker_title = segment['title']
+        content = segment['content']
+
+        segmented_content = content.split(". ")
+
+        for sentence in segmented_content:
+            processed_transcript.append( {
+                "speaker": speaker,
+                "speaker_title": speaker_title,
+                "content": sentence,
+                "sentiment": "",
+                "prepared_or_qa": ""
+            })
+                
+    return processed_transcript
+        
+    
 
 def fetch_audio(ticker, period, year):
     """Attempt to fetch from local cache, otherwise search, score and download the best match."""
