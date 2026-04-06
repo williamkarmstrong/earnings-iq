@@ -21,6 +21,7 @@ import time
 # Import our custom modules 
 from ingestion import fetch_backup_transcript, fetch_audio
 from speech import transcribe_audio, map_speakers, tokenize_audio_text
+from nlp import analyse_sentiment
 
 st.set_page_config(page_title="EarningsIQ", layout="wide")
 
@@ -104,10 +105,18 @@ if run:
         status_text.text("Tokenizing text...")
         progress_bar.progress(80)
         tokens = tokenize_audio_text(transcription["text"])
+
+        # Analyse sentiment
+        status_text.text("Analysing sentiment...")
+        progress_bar.progress(90)
+        sentiment_summary, mapped_segments = analyse_sentiment(mapped_segments)
+        st.write(sentiment_summary)
+        st.write(mapped_segments)
         
     else:
         st.warning(f"{audio_result} Falling back to Alpha Vantage API for text transcript...")
         transcript_text, transcript_error = fetch_backup_transcript(ticker, period, year)
+        
         if transcript_text:
             st.success("Successfully fetched text transcript.")
             status_text.text(f"Processing audio and transcript...")
@@ -115,6 +124,13 @@ if run:
         else:
             st.error(f"Failed to fetch both audio and text transcript. {transcript_error}")
             st.stop()
+
+        # Analyse sentiment
+        status_text.text("Analysing sentiment...")
+        progress_bar.progress(75)
+        sentiment_summary, mapped_segments = analyse_sentiment(transcript_text)
+        st.write(sentiment_summary)
+        st.write(mapped_segments)
     
     # Clear processing UI
     status_text.empty()

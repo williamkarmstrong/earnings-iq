@@ -59,8 +59,7 @@ def process_transcript(transcript):
                 "start": None,
                 "end": None,
                 "source": "alpha_vantage",
-                "type": prepared_or_qa,
-                "sentiment": None
+                "type": prepared_or_qa
             })
             id_counter += 1
                 

@@ -117,7 +117,7 @@ def map_speakers(audio_path, transcription_result):
             if "my question" in text_lower or "thanks for taking" in text_lower:
                 speaker_roles[best_speaker] = "Analyst"
 
-        role = speaker_roles.get(best_speaker, "unknown")
+        role = speaker_roles.get(best_speaker, "Unknown")
 
         processed_segment = {
             "id": segment["id"],
@@ -127,8 +127,7 @@ def map_speakers(audio_path, transcription_result):
             "start": segment["start"],
             "end": segment["end"],
             "source": "audio",
-            "type": segment_type,
-            "sentiment": None
+            "type": segment_type
         }
 
         mapped_segments.append(processed_segment)
