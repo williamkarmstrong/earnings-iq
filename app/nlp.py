@@ -88,27 +88,58 @@ def analyse_sentiment(mapped_segments):
         topic_sentiment_map[t_name].append(raw_score)
 
     # 5. Advanced Metrics Calculation
-    total = len(mapped_segments)
-    
     # Weighted Management Confidence
-    mgt_segs = [s for s in mapped_segments if s["role"] in ["CEO", "CFO", "Executive"]]
-    if mgt_segs:
-        total_words = sum(s["word_count"] for s in mgt_segs)
-        weighted_sum = sum(s["raw_sentiment_score"] * s["word_count"] for s in mgt_segs)
-        mgt_avg = weighted_sum / total_words if total_words > 0 else 0
-        management_confidence = round(((mgt_avg + 1) / 2) * 100, 1)
-    else:
-        management_confidence = 50.0
+    management_confidence = management_confidence(mapped_segments)
 
     # Narrative Shift Index
-    prep_topics = set(s["topic_id"] for s in mapped_segments if s.get("type") == "prepared" and s["topic_id"] != -1)
-    qa_topics = set(s["topic_id"] for s in mapped_segments if s.get("type") == "qa" and s["topic_id"] != -1)
-    
-    union = prep_topics.union(qa_topics)
-    jaccard_sim = len(prep_topics.intersection(qa_topics)) / len(union) if union else 1.0
-    narrative_shift_index = round((1 - jaccard_sim) * 100, 1)
+    narrative_shift_index = narrative_shift_index(mapped_segments)
 
     # Role-based Metrics
+    role_scores = role_metrics(mapped_segments)
+
+    # Q&A Stress Indicator
+    qa_stress = qa_sentiment(mapped_segments)
+
+    # Topic Decomposition
+    topic_decomp = topic_decomposition(topic_sentiment_map)
+
+    return {
+        "positive": pos_count, "negative": neg_count, "neutral": neu_count, "total": len(mapped_segments),
+        "net_score": total_raw_score / total if total > 0 else 0.0,
+        "management_confidence": management_confidence,
+        "individual_management_confidence": role_scores,
+        "narrative_shift_index": narrative_shift_index,
+        "qa_stress_indicator": qa_stress,
+        "topic_decomposition": topic_decomp
+    }, mapped_segments
+
+
+def topic_decomposition(topic_sentiment_map):
+    # Topic Decomposition formatting
+    topic_decomp = {name: round(sum(scores)/len(scores), 2) for name, scores in topic_sentiment_map.items()}
+
+    # Improved Topic Formatting logic
+    clean_decomposition = {}
+    for raw_name, score in topic_decomposition.items():
+        # Remove the ID and underscores (e.g., "1_satisfaction_customer" -> "Satisfaction Customer")
+        parts = raw_name.split("_")
+        clean_name = " ".join(parts[1:]).title()
+        
+        # Filter out junk topics
+        junk_words = {'the', 'and', 'from', 'for', 'so', 'there', 'that', 'behind', 'thank'}
+        if not any(word in parts for word in junk_words):
+            clean_decomposition[clean_name] = score
+
+    return clean_decomposition
+
+
+def qa_sentiment(mapped_segments):
+    qa_mgt = [s for s in mapped_segments if s.get("type") == "qa" and s["role"] in management_roles]
+    qa_stress = round((sum(1 for s in qa_mgt if s["sentiment"] == "negative") / len(qa_mgt) * 100), 1) if qa_mgt else 0.0
+    return qa_stress
+
+
+def role_metrics(mapped_segments):
     management_roles = ["CEO", "CFO", "Executive"]
     role_scores = {}
     for role in management_roles:
@@ -119,19 +150,25 @@ def analyse_sentiment(mapped_segments):
         else:
             role_scores[role] = 50.0
 
-    # Q&A Stress Indicator
-    qa_mgt = [s for s in mapped_segments if s.get("type") == "qa" and s["role"] in management_roles]
-    qa_stress = round((sum(1 for s in qa_mgt if s["sentiment"] == "negative") / len(qa_mgt) * 100), 1) if qa_mgt else 0.0
+    return role_scores
 
-    # Topic Decomposition formatting
-    topic_decomp = {name: round(sum(scores)/len(scores), 2) for name, scores in topic_sentiment_map.items()}
+def narrative_shift_index(mapped_segments):
+    prep_topics = set(s["topic_id"] for s in mapped_segments if s.get("type") == "prepared" and s["topic_id"] != -1)
+    qa_topics = set(s["topic_id"] for s in mapped_segments if s.get("type") == "qa" and s["topic_id"] != -1)
+    
+    union = prep_topics.union(qa_topics)
+    jaccard_sim = len(prep_topics.intersection(qa_topics)) / len(union) if union else 1.0
+    narrative_shift_index = round((1 - jaccard_sim) * 100, 1)
+    return narrative_shift_index
 
-    return {
-        "positive": pos_count, "negative": neg_count, "neutral": neu_count, "total": total,
-        "net_score": total_raw_score / total if total > 0 else 0.0,
-        "management_confidence": management_confidence,
-        "individual_management_confidence": role_scores,
-        "narrative_shift_index": narrative_shift_index,
-        "qa_stress_indicator": qa_stress,
-        "topic_decomposition": topic_decomp
-    }, mapped_segments
+def management_confidence(mapped_segments):
+    mgt_segs = [s for s in mapped_segments if s["role"] in ["CEO", "CFO", "Executive"]]
+    if mgt_segs:
+        total_words = sum(s["word_count"] for s in mgt_segs)
+        weighted_sum = sum(s["raw_sentiment_score"] * s["word_count"] for s in mgt_segs)
+        mgt_avg = weighted_sum / total_words if total_words > 0 else 0
+        management_confidence = round(((mgt_avg + 1) / 2) * 100, 1)
+    else:
+        management_confidence = 50.0
+
+    return management_confidence
