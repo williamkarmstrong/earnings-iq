@@ -16,8 +16,62 @@ import os
 
 load_dotenv()
 
-ALPHA_VANTAGE_API_KEY = st.secrets["ALPHA_VANTAGE_API_KEY"]
-#ALPHA_VANTAGE_API_KEY = "" # To not waste API credits during testing
+# Use .get() so a missing key doesn't crash the app at import time.
+# Set to "" in secrets.toml to disable and preserve API credits during testing.
+ALPHA_VANTAGE_API_KEY = st.secrets.get("ALPHA_VANTAGE_API_KEY", "")
+
+@st.cache_data(show_spinner=False)
+def fetch_transcript_cached(ticker, period, year):
+    """
+    Fetch an Alpha Vantage transcript with local file caching.
+    Checks cache/{TICKER}_{YEAR}_{PERIOD}_transcript.txt first -- no API call if found.
+    Saves to that path on first successful fetch so repeat runs are instant.
+    Returns (transcript_text_string, error_message).
+    """
+    cache_dir = "cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, f"{ticker}_{year}_{period}_transcript.txt")
+
+    # Return from local cache if it contains speaker-formatted lines (Name: text).
+    # Old cache files (content-only, no speaker names) are re-fetched once so
+    # speaker attribution can work. Files without an API key are used as-is.
+    if os.path.exists(cache_file):
+        with open(cache_file, "r", encoding="utf-8") as f:
+            cached = f.read()
+        import re as _re
+        has_speaker_format = bool(_re.search(r'^[A-Z][A-Za-z \.]{2,40}:\s', cached, _re.MULTILINE))
+        if has_speaker_format or not ALPHA_VANTAGE_API_KEY:
+            return cached, None
+        # Old format detected and API key available -- fall through to re-fetch
+
+    raw, err = fetch_backup_transcript(ticker, period, year)
+    if raw is None:
+        return None, err
+
+    # AV returns a list of {speaker, content} dicts -- format as "Speaker: text"
+    # so parse_av_speakers can extract names. Plain-string fallback kept for safety.
+    if isinstance(raw, list):
+        lines = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            speaker = (item.get("speaker") or item.get("name") or "").strip()
+            content = (item.get("content") or item.get("text") or "").strip()
+            if speaker and content:
+                lines.append(f"{speaker}: {content}")
+            elif content:
+                lines.append(content)
+        text = "\n".join(lines)
+    else:
+        text = str(raw)
+
+    if text.strip():
+        with open(cache_file, "w", encoding="utf-8") as f:
+            f.write(text)
+        return text, None
+
+    return None, "Alpha Vantage returned an empty transcript."
+
 
 def fetch_backup_transcript(ticker, period, year):
     """Fallback: fetch text transcript from Alpha Vantage API or return error message."""
@@ -115,15 +169,6 @@ def fetch_audio(ticker, period, year):
 
         ydl_opts_dl = {
             'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav',
-            }],
-            'postprocessor_args': [
-                '-ac', '1',        # mono
-                '-ar', '16000',    # 16kHz
-                '-f', 'wav'
-            ],
             'outtmpl': outtmpl,
             'quiet': True,
         }
