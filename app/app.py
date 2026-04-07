@@ -116,10 +116,6 @@ with st.sidebar:
     run = st.button("Analyse Call", use_container_width=True, type="primary")
     st.divider()
 
-    fb = "[OK]" if _finbert_available else "[--]"
-    w2 = "[OK]" if _wav2vec2_available else "[--]"
-    st.caption(f"Models: {fb} FinBERT  {w2} Wav2Vec2  [OK] Whisper")
-
     with st.expander("Metrics guide"):
         st.markdown("""
 **MCI (0-100):** FinBERT 40% + Wav2Vec2 35% + Pause 15% + Pitch 10% *(full multimodal)*
