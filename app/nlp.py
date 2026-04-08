@@ -8,29 +8,30 @@ than a single aggregate -- this powers the intra-call timeline.
 from transformers import pipeline
 import spacy
 import numpy as np
+import streamlit as st
 
-# Load FinBERT once at module level so it isn't reloaded on every function call.
-# FinBERT is fine-tuned on financial text so outperforms general-purpose
-# sentiment models on earnings call language.
-# Wrapped in try/except -- if the model hasn't downloaded yet the app still runs,
-# but sentiment scores will return 0.0 (neutral).
-try:
-    _finbert = pipeline(
-        "text-classification",
-        model="ProsusAI/finbert",
-        top_k=None,
-    )
-    _finbert_available = True
-except Exception as _e:
-    print(f"FinBERT unavailable: {_e} -- sentiment will default to neutral")
-    _finbert = None
-    _finbert_available = False
 
-# spaCy for sentence splitting
-try:
-    _nlp = spacy.load("en_core_web_sm")
-except OSError:
-    _nlp = None
+@st.cache_resource(show_spinner="Loading FinBERT sentiment model…")
+def _load_finbert():
+    """Load FinBERT once per server session via st.cache_resource."""
+    try:
+        model = pipeline("text-classification", model="ProsusAI/finbert", top_k=None)
+        return model, True
+    except Exception as e:
+        print(f"FinBERT unavailable: {e} -- sentiment will default to neutral")
+        return None, False
+
+
+@st.cache_resource(show_spinner=False)
+def _load_spacy():
+    try:
+        return spacy.load("en_core_web_sm")
+    except OSError:
+        return None
+
+
+_finbert, _finbert_available = _load_finbert()
+_nlp = _load_spacy()
 
 
 def _score_text(text):
@@ -66,6 +67,32 @@ def analyse_sentiment(text):
         "neutral": scores.get("neutral", 0.0),
         "negative": scores.get("negative", 0.0),
     }
+
+
+def weighted_segment_mean(segments, field="sentiment_score", min_words=8):
+    """
+    Word-count-weighted mean of a numeric field across enriched segments.
+
+    Segments shorter than min_words are excluded from the average so that
+    filler phrases ("Thank you", "Good morning", "Sure") don't dilute the
+    signal from information-rich sentences about operations or guidance.
+    Longer segments receive proportionally more weight.
+
+    Falls back to an unweighted mean if no segment meets the word threshold
+    (e.g. very short audio clips where all segments are brief).
+    """
+    qualifying = [
+        (s.get(field, 0.0), len(s.get("text", "").split()))
+        for s in segments
+        if len(s.get("text", "").split()) >= min_words
+    ]
+    if not qualifying:
+        vals = [s.get(field, 0.0) for s in segments]
+        return float(np.mean(vals)) if vals else 0.0
+    total_w = sum(w for _, w in qualifying)
+    if total_w == 0:
+        return 0.0
+    return round(sum(v * w for v, w in qualifying) / total_w, 4)
 
 
 def analyse_segments(mapped_segments, batch_size=16):
@@ -171,18 +198,49 @@ def extract_talking_points(segments=None, transcript_text=None, n=6):
 
 def analyse_transcript_text(transcript_text):
     """
-    Quick single-pass analysis of a raw transcript string for QoQ comparison.
+    Quick multi-sample analysis of a raw transcript string for QoQ comparison.
+    Samples 5 evenly-spaced windows of 1500 chars across the full transcript
+    and averages the FinBERT scores — avoids the boilerplate-truncation bias
+    that occurs when only the opening 1500 chars (safe harbour / operator intro)
+    are scored.
     Returns a dict with overall sentiment and hedging frequency.
     """
     if not transcript_text or not transcript_text.strip():
         return {"sentiment": 0.0, "positive": 0.0, "negative": 0.0, "hedge_freq": 0.0}
-    sentiment = analyse_sentiment(transcript_text)
-    fake_seg  = [{"text": transcript_text}]
-    hedge     = get_hedging_frequency(fake_seg)
+
+    # Sample evenly across the transcript; skip the first 10% (boilerplate)
+    n_samples  = 5
+    chunk_size = 1500
+    text       = transcript_text.strip()
+    start_off  = max(0, int(len(text) * 0.10))  # skip opening boilerplate
+    usable_len = len(text) - start_off
+    step       = max(chunk_size, usable_len // n_samples)
+
+    scores_pos, scores_neg, scores_neu = [], [], []
+    for i in range(n_samples):
+        offset  = start_off + i * step
+        if offset >= len(text):
+            break
+        chunk   = text[offset: offset + chunk_size]
+        result  = analyse_sentiment(chunk)
+        scores_pos.append(result["positive"])
+        scores_neg.append(result["negative"])
+        scores_neu.append(result["neutral"])
+
+    if not scores_pos:
+        return {"sentiment": 0.0, "positive": 0.0, "negative": 0.0, "hedge_freq": 0.0}
+
+    avg_pos  = float(np.mean(scores_pos))
+    avg_neg  = float(np.mean(scores_neg))
+    avg_neu  = float(np.mean(scores_neu))
+    avg_sent = round(avg_pos - avg_neg, 4)
+
+    fake_seg = [{"text": transcript_text}]
+    hedge    = get_hedging_frequency(fake_seg)
     return {
-        "sentiment":  sentiment["score"],
-        "positive":   sentiment["positive"],
-        "negative":   sentiment["negative"],
+        "sentiment":  avg_sent,
+        "positive":   round(avg_pos, 4),
+        "negative":   round(avg_neg, 4),
         "hedge_freq": hedge["frequency_per_100"],
     }
 
@@ -256,7 +314,8 @@ def compute_nsi(current_stats, historical_stats):
     cur_hedge = current_stats.get("hedge_freq", 0.0)
     hist_hedge_mean = float(np.mean(hist_hedges)) if hist_hedges else 0.0
 
-    nsi_sigma = round((cur_sent - hist_mean) / hist_std, 2) if hist_std > 0 else 0.0
+    hist_std_floored = max(hist_std, 0.05)  # floor: prevent absurd sigma from near-zero variance
+    nsi_sigma = round((cur_sent - hist_mean) / hist_std_floored, 2) if hist_std > 0 else 0.0
 
     if nsi_sigma > 1.0:
         direction = "Meaningfully more positive"
@@ -280,21 +339,156 @@ def compute_nsi(current_stats, historical_stats):
     }
 
 
-def split_prepared_vs_qa(segments):
+_QA_TRANSITION_PHRASES = [
+    "we will now begin the question",
+    "we will now open the floor",
+    "we'll now open the floor",
+    "open the floor to questions",
+    "open for questions",
+    "now open for questions",
+    "operator, please open",
+    "your first question",
+    "first question comes from",
+    "first question is from",
+    "we'll take our first question",
+    "take the first question",
+    "question-and-answer session",
+    "question and answer session",
+    "q&a session",
+    "begin q&a",
+    "start the q&a",
+    "open the q&a",
+    "ready for questions",
+]
+
+
+def find_qa_start_time(segments):
+    """
+    Multi-strategy Q&A start detection. Returns time in seconds, or None.
+
+    All strategies enforce a 10-minute minimum (600s) — Q&A never starts
+    in the opening remarks, so any signal before that is an intro mention
+    (e.g. "This call will include a Q&A session") and must be ignored.
+
+    Strategy 1 — Operator phrase, exact:
+        Operator segment containing a transition phrase → use segment END
+        (Q&A begins after the operator finishes their announcement).
+
+    Strategy 2 — Any segment phrase, interpolated:
+        Find the character position of the phrase within the segment text
+        and linearly interpolate to get the exact second rather than the
+        segment boundary (Whisper segments span 5-20s each).
+
+    Strategy 3 — First confirmed analyst speaker (non-operator):
+        First resolved non-management, non-operator speaker segment after
+        the 10-min mark. Excludes UNKNOWN and SPEAKER_XX labels.
+
+    Strategy 4 — Returns None; caller falls back to 65% heuristic.
+    """
+    from speech import is_management_speaker as _is_mgmt
+
+    _OPERATOR_LABELS = {"operator", "moderator", "conference", "coordinator"}
+    _MIN_QA_SECONDS  = 600   # Q&A cannot start before 10 min
+
+    # Strategies 1 & 2: phrase-based with within-segment interpolation
+    for seg in segments:
+        seg_start = float(seg.get("start", 0))
+        if seg_start < _MIN_QA_SECONDS:
+            continue  # skip — this is an intro mention, not the actual transition
+
+        text       = seg.get("text", "")
+        text_lower = text.lower()
+        seg_end    = float(seg.get("end", seg_start + 10))
+        speaker    = seg.get("speaker", "").lower()
+
+        for phrase in _QA_TRANSITION_PHRASES:
+            if phrase in text_lower:
+                is_operator = any(lbl in speaker for lbl in _OPERATOR_LABELS)
+                if is_operator:
+                    return seg_end   # Q&A begins after operator finishes
+                phrase_pos = text_lower.find(phrase)
+                frac = phrase_pos / max(len(text), 1)
+                return round(seg_start + frac * (seg_end - seg_start), 2)
+
+    # Strategy 3: first confirmed analyst speaker (not operator, not unresolved)
+    for seg in segments:
+        seg_start = float(seg.get("start", 0))
+        if seg_start < _MIN_QA_SECONDS:
+            continue
+        spk = seg.get("speaker", "")
+        spk_lower = spk.lower()
+        if (spk
+                and spk not in ("UNKNOWN", "")
+                and not spk_lower.startswith("speaker_")
+                and not any(lbl in spk_lower for lbl in _OPERATOR_LABELS)
+                and _is_mgmt(spk) is False):
+            return seg_start
+
+    return None
+
+
+def split_prepared_vs_qa(segments, search_segments=None):
     """
     Split segments into prepared remarks and Q&A.
-    Whisper doesn't label sections so we use a heuristic: Q&A typically
-    starts around 65% through the call duration.
-    Price et al. (2012) identify this split as the highest-alpha section.
+
+    search_segments: the segment list to scan for Q&A transition phrases.
+        Pass all enriched_segments here (including operator turns) so the
+        operator's announcement is not missed when `segments` has been
+        pre-filtered to management-only.  Defaults to `segments` when omitted.
+
+    Falls back to the 65% duration heuristic only when no phrase is found.
+    Price et al. (2012) identify the Q&A section as the highest-alpha section.
     Returns two lists: (prepared_segments, qa_segments)
     """
     if not segments:
         return [], []
+
+    source = search_segments if search_segments is not None else segments
+    qa_start_time = find_qa_start_time(source)
+
+    if qa_start_time is not None:
+        prepared = [s for s in segments if s.get("start", 0) < qa_start_time]
+        qa       = [s for s in segments if s.get("start", 0) >= qa_start_time]
+        return prepared, qa
+
+    # Fallback: 65% duration heuristic
     max_time = max(seg.get("end", 0) for seg in segments)
-    qa_start = max_time * 0.65
-    prepared = [s for s in segments if s.get("start", 0) < qa_start]
-    qa = [s for s in segments if s.get("start", 0) >= qa_start]
+    qa_start_time = max_time * 0.65
+    prepared = [s for s in segments if s.get("start", 0) < qa_start_time]
+    qa       = [s for s in segments if s.get("start", 0) >= qa_start_time]
     return prepared, qa
+
+
+def compute_text_qa_stress(text):
+    """
+    Compute Q&A stress from a plain transcript string (no timestamps).
+    Splits at the first Q&A transition phrase; falls back to 65% position.
+    Returns prepared_sentiment - qa_sentiment (positive = stress in Q&A).
+    Returns 0.0 if the text is too short to split meaningfully.
+    """
+    if not text or len(text) < 500:
+        return 0.0
+
+    split_pos = None
+    text_lower = text.lower()
+    for phrase in _QA_TRANSITION_PHRASES:
+        idx = text_lower.find(phrase)
+        if idx > 0:
+            split_pos = idx
+            break
+
+    if split_pos is None:
+        split_pos = int(len(text) * 0.65)
+
+    prepared_text = text[:split_pos].strip()
+    qa_text       = text[split_pos:].strip()
+
+    if len(prepared_text) < 200 or len(qa_text) < 200:
+        return 0.0
+
+    prep_sent = analyse_sentiment(prepared_text[:1500])["score"]
+    qa_sent   = analyse_sentiment(qa_text[:1500])["score"]
+    return round(prep_sent - qa_sent, 3)
 
 
 # Common words to exclude from keyword extraction (financial context aware)
@@ -326,13 +520,18 @@ def extract_key_insights(segments, n=3):
 
     valid = [s for s in segments if s.get("text", "").strip()]
 
+    def _speaker_entry(s):
+        """Return speaker name from segment, already includes title if resolved."""
+        return s.get("speaker", "") or ""
+
     # Top positive moments -- management expressing confidence or strong results
     highlights = sorted(valid, key=lambda s: s.get("sentiment_score", 0), reverse=True)
     highlights = [
         {
-            "text": s["text"].strip(),
-            "score": round(s.get("sentiment_score", 0), 2),
+            "text":     s["text"].strip(),
+            "score":    round(s.get("sentiment_score", 0), 2),
             "time_min": round(s.get("start", 0) / 60, 1),
+            "speaker":  _speaker_entry(s),
         }
         for s in highlights[:n] if s.get("sentiment_score", 0) > 0.05
     ]
@@ -341,34 +540,17 @@ def extract_key_insights(segments, n=3):
     risk_signals = sorted(valid, key=lambda s: s.get("sentiment_score", 0))
     risk_signals = [
         {
-            "text": s["text"].strip(),
-            "score": round(s.get("sentiment_score", 0), 2),
+            "text":     s["text"].strip(),
+            "score":    round(s.get("sentiment_score", 0), 2),
             "time_min": round(s.get("start", 0) / 60, 1),
+            "speaker":  _speaker_entry(s),
         }
         for s in risk_signals[:n] if s.get("sentiment_score", 0) < -0.05
     ]
 
-    # Hedging language moments -- signals of management caution or uncertainty
-    HEDGE_WORDS = {
-        "uncertain", "uncertainty", "headwinds", "challenging", "difficult",
-        "volatile", "risk", "risks", "concern", "concerns", "potentially",
-        "guidance", "limited", "pressured", "pressure", "cautious",
-    }
-    hedging_moments = []
-    for s in valid:
-        words = s.get("text", "").lower().split()
-        hits = list({w.strip(".,;:") for w in words if w.strip(".,;:") in HEDGE_WORDS})
-        if hits:
-            hedging_moments.append({
-                "text": s["text"].strip(),
-                "hedge_words": hits[:3],
-                "time_min": round(s.get("start", 0) / 60, 1),
-            })
-
     return {
-        "highlights": highlights,
+        "highlights":   highlights,
         "risk_signals": risk_signals,
-        "hedging_moments": hedging_moments[:n],
     }
 
 
