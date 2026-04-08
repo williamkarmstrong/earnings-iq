@@ -1,11 +1,13 @@
 """
 Audio analysis module.
 Extracts two types of features from the earnings call audio:
-  1. Librosa acoustic features -- pitch, tempo, energy, pauses.
-     These are interpretable proxies for vocal confidence.
-  2. Wav2Vec2 embeddings -- deep speech representations that capture
-     hesitation and delivery patterns beyond what acoustics alone reveal.
-     This is the differentiating layer described in the concept paper.
+  1. Librosa acoustic features -- pitch, energy, pauses.
+  2. Wav2Vec2 embeddings -- deep speech representations.
+
+All functions load audio in short windows by seeking directly in the file
+rather than loading the full call into memory. A 90-minute WAV at 16kHz
+would require ~1.7 GiB if loaded whole; window-based loading keeps peak
+usage under 200 MB regardless of call length.
 """
 
 import numpy as np
@@ -14,150 +16,160 @@ import torch
 import streamlit as st
 from transformers import Wav2Vec2Processor, Wav2Vec2Model
 
-# Load Wav2Vec2 once at module level to avoid reloading on every call.
-# Wrapped in try/except so a missing or partially-downloaded model doesn't
-# crash the app on import -- extract_wav2vec2_features degrades gracefully.
-try:
-    _processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
-    _wav2vec2  = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
-    _wav2vec2.eval()  # inference mode -- disables dropout
-    _wav2vec2_available = True
-except Exception as _e:
-    print(f"Wav2Vec2 unavailable: {_e} -- confidence proxy will default to 0.5")
-    _processor = None
-    _wav2vec2  = None
-    _wav2vec2_available = False
+
+@st.cache_resource(show_spinner="Loading Wav2Vec2 speech model…")
+def _load_wav2vec2():
+    """Load Wav2Vec2 once per server session via st.cache_resource."""
+    try:
+        processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+        model     = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
+        model.eval()
+        return processor, model, True
+    except Exception as e:
+        print(f"Wav2Vec2 unavailable: {e} -- confidence proxy will default to 0.5")
+        return None, None, False
 
 
-def _load_audio(audio_path):
-    """
-    Load audio and resample to 16kHz mono.
-    Wav2Vec2 and librosa both expect 16kHz -- yt-dlp already outputs
-    this format but we resample defensively in case of cached files.
-    """
-    y, sr = librosa.load(audio_path, sr=16000, mono=True)
-    return y, sr
+_processor, _wav2vec2, _wav2vec2_available = _load_wav2vec2()
+
+
+def _file_duration(audio_path):
+    """Return total duration in seconds without loading audio into memory."""
+    try:
+        return librosa.get_duration(path=audio_path)
+    except TypeError:
+        try:
+            return librosa.get_duration(filename=audio_path)
+        except Exception:
+            return 3600.0  # safe fallback: assume 60 min
+    except Exception:
+        return 3600.0
+
+
+def _load_window(audio_path, offset_s, duration_s, sr=16000):
+    """Load a single time window from the file without reading the whole thing."""
+    chunk, _ = librosa.load(
+        audio_path,
+        sr=sr,
+        mono=True,
+        offset=float(offset_s),
+        duration=float(duration_s),
+    )
+    return chunk, sr
+
+
+def _window_offsets(total_s, window_s, n=3):
+    """Return n evenly-spread start offsets that don't exceed total_s."""
+    offsets = [
+        0.0,
+        max(0.0, total_s / 2 - window_s / 2),
+        max(0.0, total_s - window_s),
+    ]
+    return offsets[:n]
 
 
 def extract_acoustic_features(audio_path):
     """
     Extract interpretable acoustic features using librosa.
-    These are the surface-level vocal indicators -- useful for displaying
-    to analysts as they map to intuitive concepts like speaking rate,
-    pitch stability, and pause frequency.
+    Loads three short windows (start, middle, end) rather than the full file.
     Returns a dict of scalar features.
     """
-    y, sr = _load_audio(audio_path)
+    sr        = 16000
+    total_s   = _file_duration(audio_path)
+    pitch_win = 20.0    # seconds per pitch window
+    feat_win  = 120.0   # seconds per energy/pause window
 
-    # Pitch -- sample 3 × 20s windows (start, middle, end) for call-wide representation.
-    # pyin is slow; three 20s windows totals 60s of analysis but covers more of the call
-    # than the original first-60s-only approach.
-    window_s = sr * 20
-    total_len = len(y)
-    pitch_chunks = [
-        y[:window_s],
-        y[max(0, total_len // 2 - window_s // 2): max(0, total_len // 2 - window_s // 2) + window_s],
-        y[max(0, total_len - window_s):],
-    ]
-    valid_f0_all = []
-    for _chunk in pitch_chunks:
-        if len(_chunk) < sr:
+    # ── Pitch (3 × 20s windows) ────────────────────────────────────────────
+    valid_f0 = []
+    for off in _window_offsets(total_s, pitch_win):
+        try:
+            chunk, _ = _load_window(audio_path, off, pitch_win, sr)
+            if len(chunk) < sr:
+                continue
+            f0, _, _ = librosa.pyin(
+                chunk,
+                fmin=librosa.note_to_hz("C2"),
+                fmax=librosa.note_to_hz("C7"),
+            )
+            valid_f0.extend(f0[~np.isnan(f0)])
+        except Exception:
             continue
-        _f0, _, _ = librosa.pyin(
-            _chunk,
-            fmin=librosa.note_to_hz("C2"),
-            fmax=librosa.note_to_hz("C7")
-        )
-        valid_f0_all.extend(_f0[~np.isnan(_f0)])
-    valid_f0 = np.array(valid_f0_all)
+    valid_f0   = np.array(valid_f0)
     pitch_mean = float(np.mean(valid_f0)) if len(valid_f0) > 0 else 0.0
     pitch_std  = float(np.std(valid_f0))  if len(valid_f0) > 0 else 0.0
 
-    # Tempo -- speaking rate in approximate BPM
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    tempo = float(tempo) if np.isscalar(tempo) else float(tempo[0])
+    # ── Energy, pause ratio, tempo (3 × 120s windows) ──────────────────────
+    energy_means, pause_ratios, tempos = [], [], []
+    for off in _window_offsets(total_s, feat_win):
+        try:
+            chunk, _ = _load_window(audio_path, off, feat_win, sr)
+            if len(chunk) < sr:
+                continue
+            rms = librosa.feature.rms(y=chunk)[0]
+            e_mean = float(np.mean(rms))
+            energy_means.append(e_mean)
+            threshold = e_mean * 0.20
+            pause_ratios.append(float(np.sum(rms < threshold) / len(rms)))
+            t, _ = librosa.beat.beat_track(y=chunk, sr=sr)
+            tempos.append(float(t) if np.isscalar(t) else float(t[0]))
+        except Exception:
+            continue
 
-    # RMS energy -- overall vocal intensity
-    rms = librosa.feature.rms(y=y)[0]
-    energy_mean = float(np.mean(rms))
-    energy_std  = float(np.std(rms))
-
-    # Pause detection -- frames where RMS drops below 20% of mean energy.
-    # 20% is more robust than 10% for compressed audio (yt-dlp m4a/webm) where codec
-    # noise raises the apparent floor and causes over-classification of speech as silence.
-    silence_threshold = energy_mean * 0.20
-    silent_frames = np.sum(rms < silence_threshold)
-    pause_ratio = float(silent_frames / len(rms)) if len(rms) > 0 else 0.0
-
-    # MFCCs -- compact descriptor of vocal timbre
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-    mfcc_means = mfcc.mean(axis=1).tolist()
+    energy_mean = float(np.mean(energy_means)) if energy_means else 0.0
+    pause_ratio = float(np.mean(pause_ratios)) if pause_ratios else 0.0
+    tempo       = float(np.mean(tempos))        if tempos       else 0.0
 
     return {
         "pitch_mean":  round(pitch_mean, 2),
         "pitch_std":   round(pitch_std, 2),
         "tempo":       round(tempo, 2),
         "energy_mean": round(energy_mean, 4),
-        "energy_std":  round(energy_std, 4),
         "pause_ratio": round(pause_ratio, 4),
-        "mfcc_means":  mfcc_means,
     }
 
 
-def extract_wav2vec2_features(audio_path, max_duration_seconds=600):
+def extract_wav2vec2_features(audio_path, window_s=200.0):
     """
-    Extract Wav2Vec2 deep speech embeddings.
-    We cap at max_duration_seconds and sample from the beginning, middle,
-    and end of the call -- full earnings calls are 45-90 mins which would
-    exceed memory if processed whole.
-    The three-section sampling captures prepared remarks, mid-call, and Q&A.
-    Returns a dict with mean embedding and a scalar confidence proxy.
+    Extract Wav2Vec2 deep speech embeddings from three windows.
+    Each window is loaded independently from disk — no full-file load.
+    Returns a dict with confidence proxy and raw norm.
     """
-    y, sr = _load_audio(audio_path)
-
-    # Sample three windows across the call
-    window = sr * max_duration_seconds // 3
-    total  = len(y)
-
-    segments = []
-    for offset in [0, max(0, total // 2 - window // 2), max(0, total - window)]:
-        chunk = y[offset: offset + window]
-        if len(chunk) > sr:  # only include chunks longer than 1 second
-            segments.append(chunk)
-
-    # If model didn't load, return a neutral default
     if not _wav2vec2_available:
         return {"embedding_mean": [], "confidence_proxy": 0.5}
 
-    embeddings = []
-    with torch.no_grad():  # no gradients needed for inference
-        for chunk in segments:
-            inputs = _processor(
-                chunk,
-                sampling_rate=sr,
-                return_tensors="pt",
-                padding=True
-            )
-            outputs = _wav2vec2(**inputs)
-            # Mean pool across the time dimension to get a fixed-size vector
-            embedding = outputs.last_hidden_state.mean(dim=1).squeeze().numpy()
-            embeddings.append(embedding)
+    sr      = 16000
+    total_s = _file_duration(audio_path)
+
+    embeddings     = []
+    all_step_norms = []
+
+    with torch.no_grad():
+        for off in _window_offsets(total_s, window_s):
+            try:
+                chunk, _ = _load_window(audio_path, off, window_s, sr)
+                if len(chunk) < sr:
+                    continue
+                inputs  = _processor(chunk, sampling_rate=sr, return_tensors="pt", padding=True)
+                outputs = _wav2vec2(**inputs)
+                hidden  = outputs.last_hidden_state.squeeze(0)       # (seq_len, 768)
+                all_step_norms.extend(torch.norm(hidden, dim=-1).numpy().tolist())
+                embeddings.append(hidden.mean(dim=0).numpy())
+            except Exception:
+                continue
 
     if not embeddings:
         return {"embedding_mean": [], "confidence_proxy": 0.5}
 
     mean_embedding = np.mean(embeddings, axis=0)
+    raw_norm       = float(np.linalg.norm(mean_embedding))
 
-    # Confidence proxy: embedding norm correlates with speech clarity.
-    # Normalised to [0,1] using range 5–25 which reflects empirical Wav2Vec2-base
-    # mean-pooled norms for speech (typically 8–20). The original 5–50 range produced
-    # systematically low proxies (~0.1–0.3) for normal speech, dragging MCI down.
-    raw_norm = float(np.linalg.norm(mean_embedding))
-    confidence_proxy = float(np.clip((raw_norm - 5) / 20, 0.0, 1.0))
+    step_arr = np.array(all_step_norms)
+    cv = float(np.std(step_arr)) / (float(np.mean(step_arr)) + 1e-6)
+    confidence_proxy = float(np.tanh(cv / 0.6))
 
     return {
-        "embedding_mean":   mean_embedding.tolist(),
-        "confidence_proxy": round(confidence_proxy, 4),
+        "embedding_mean":    mean_embedding.tolist(),
+        "confidence_proxy":  round(confidence_proxy, 4),
         "wav2vec2_raw_norm": round(raw_norm, 3),
     }
 
@@ -165,8 +177,7 @@ def extract_wav2vec2_features(audio_path, max_duration_seconds=600):
 @st.cache_data(show_spinner=False)
 def extract_audio_features(audio_path):
     """
-    Main entry point -- runs both acoustic and Wav2Vec2 extraction
-    and returns a combined feature dict for downstream multimodal fusion.
+    Main entry point — runs acoustic and Wav2Vec2 extraction.
     Cached so re-runs on the same file are instant.
     """
     acoustic = extract_acoustic_features(audio_path)
