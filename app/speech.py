@@ -148,6 +148,49 @@ def resolve_speaker_names(diarized_segments, av_turns, title_map=None):
     ]
 
 
+_EXEC_TITLES = {
+    "ceo", "cfo", "coo", "cso", "cto", "cio", "president", "chairman", "chair",
+    "chief", "officer", "director", "founder", "vice president", "vp",
+    "investor relations",
+}
+_ANALYST_MARKERS = {
+    "analyst", "research",
+    "goldman sachs", "morgan stanley", "j.p. morgan", "jpmorgan", "bank of america",
+    "bofa", "barclays", "ubs", "citi", "citigroup", "wells fargo", "credit suisse",
+    "deutsche bank", "raymond james", "oppenheimer", "cowen", "needham", "jefferies",
+    "piper sandler", "baird", "rbc", "td securities", "bernstein", "truist", "mizuho",
+    "bmo", "stifel", "cantor fitzgerald", "macquarie", "keybanc", "evercore",
+    "guggenheim", "rosenblatt",
+}
+_EXCLUDE_LABELS = {"operator", "moderator", "conference", "coordinator"}
+
+
+def is_management_speaker(name):
+    """
+    Classify a resolved speaker name as management, analyst/external, or unknown.
+
+    Returns:
+      True  — confirmed management/executive (name contains an exec title)
+      False — confirmed non-management (operator, analyst, or known research firm)
+      None  — ambiguous (plain name with no title, e.g. unresolved SPEAKER_XX)
+    """
+    if not name or name.upper() == "UNKNOWN":
+        return False
+    lower = name.lower()
+    if lower.startswith("speaker_"):
+        return None  # unresolved pyannote label
+    for marker in _EXCLUDE_LABELS:
+        if marker in lower:
+            return False
+    for marker in _ANALYST_MARKERS:
+        if marker in lower:
+            return False
+    for title in _EXEC_TITLES:
+        if title in lower:
+            return True
+    return None  # resolved name but no title info — ambiguous
+
+
 @st.cache_data(show_spinner=False)
 def tokenize_audio_text(text):
     """
