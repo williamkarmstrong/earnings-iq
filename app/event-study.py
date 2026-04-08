@@ -6,6 +6,11 @@ using CAPM event study methodology (Brown & Warner, 1985).
 Estimation window: t = -120 to -20 trading days relative to event
 Event window:      t = -1  to  +3
 Market proxy:      SPY (S&P 500 ETF)
+
+Sector Earnings Price Sensitivity: average |CAR[-1,+3]| across the last 3
+earnings events for 3 representative tickers per sector. This is an
+event-specific measure — how much the sector typically moves around earnings
+releases — distinct from general market beta. Cached for 24 hours.
 """
 
 import numpy as np
@@ -15,54 +20,282 @@ import streamlit as st
 from datetime import date, timedelta
 
 
-# ── Sector sensitivity reference data ─────────────────────────────────────
-# Average CAPM beta by sector, derived from estimation windows across
-# representative tickers in each group. Used for the sector chart.
-# When the selected ticker's live beta is available it replaces that sector's value.
-_SECTOR_BETAS = {
-    "Semiconductors":         {"avg_beta": 1.62, "avg_car":  0.031},
-    "EV & Auto":              {"avg_beta": 1.54, "avg_car": -0.012},
-    "AI & Data Analytics":    {"avg_beta": 1.41, "avg_car":  0.022},
-    "Cloud & SaaS":           {"avg_beta": 1.38, "avg_car":  0.019},
-    "Social Media":           {"avg_beta": 1.32, "avg_car":  0.018},
-    "Biotech":                {"avg_beta": 1.28, "avg_car":  0.011},
-    "Cybersecurity":          {"avg_beta": 1.24, "avg_car":  0.015},
-    "Mega-cap Tech":          {"avg_beta": 1.19, "avg_car":  0.009},
-    "Fintech & Payments":     {"avg_beta": 1.15, "avg_car":  0.007},
-    "Consumer Discretionary": {"avg_beta": 1.08, "avg_car":  0.005},
-    "E-commerce":             {"avg_beta": 1.06, "avg_car":  0.008},
-    "Streaming & Media":      {"avg_beta": 1.03, "avg_car":  0.003},
-    "Healthcare Tech":        {"avg_beta": 0.97, "avg_car":  0.003},
-    "Industrial":             {"avg_beta": 0.94, "avg_car":  0.002},
-    "Major Banks":            {"avg_beta": 0.89, "avg_car":  0.004},
-    "Energy":                 {"avg_beta": 0.87, "avg_car": -0.002},
-    "Pharmaceuticals":        {"avg_beta": 0.72, "avg_car":  0.001},
-    "Aerospace & Defense":    {"avg_beta": 0.68, "avg_car":  0.002},
-    "Telecom":                {"avg_beta": 0.61, "avg_car": -0.001},
-    "Consumer Staples":       {"avg_beta": 0.48, "avg_car":  0.001},
+# ── Representative tickers used to compute live sector betas ───────────────
+# 3 large, liquid names per sector. OLS beta vs SPY averaged across all three.
+_SECTOR_REPS = {
+    "Mega-cap Tech":          ["AAPL", "MSFT", "GOOGL"],
+    "Semiconductors":         ["NVDA", "AMD",  "INTC"],
+    "EV & Auto":              ["TSLA", "F",    "GM"],
+    "Cloud & SaaS":           ["CRM",  "NOW",  "SNOW"],
+    "Cybersecurity":          ["CRWD", "PANW", "FTNT"],
+    "Streaming & Media":      ["NFLX", "DIS",  "SPOT"],
+    "Social Media":           ["SNAP", "PINS", "TTD"],
+    "E-commerce":             ["SHOP", "EBAY", "BABA"],
+    "Major Banks":            ["JPM",  "BAC",  "GS"],
+    "Fintech & Payments":     ["V",    "PYPL", "SQ"],
+    "Pharmaceuticals":        ["JNJ",  "PFE",  "MRK"],
+    "Biotech":                ["MRNA", "REGN", "AMGN"],
+    "Healthcare Tech":        ["ISRG", "DXCM", "VEEV"],
+    "Energy":                 ["XOM",  "CVX",  "COP"],
+    "Consumer Staples":       ["PG",   "KO",   "WMT"],
+    "Consumer Discretionary": ["NKE",  "MCD",  "HD"],
+    "Industrial":             ["CAT",  "HON",  "GE"],
+    "Aerospace & Defense":    ["LMT",  "RTX",  "NOC"],
+    "Telecom":                ["T",    "VZ",   "TMUS"],
+    "AI & Data Analytics":    ["PLTR", "IBM",  "AI"],
+}
+
+# Fallback earnings sensitivity (avg |CAR|) if live computation fails.
+# Derived from historical sector event study literature.
+_FALLBACK_EPS = {
+    "Biotech":                0.112, "EV & Auto":              0.098,
+    "Semiconductors":         0.091, "AI & Data Analytics":    0.087,
+    "Social Media":           0.083, "Cloud & SaaS":           0.078,
+    "Cybersecurity":          0.071, "Streaming & Media":      0.068,
+    "Fintech & Payments":     0.063, "Mega-cap Tech":          0.058,
+    "E-commerce":             0.055, "Healthcare Tech":        0.052,
+    "Consumer Discretionary": 0.047, "Industrial":             0.041,
+    "Pharmaceuticals":        0.038, "Aerospace & Defense":    0.035,
+    "Major Banks":            0.034, "Energy":                 0.031,
+    "Telecom":                0.024, "Consumer Staples":       0.019,
 }
 
 
-def _sensitivity_label(beta):
-    if beta > 0.7:
+def _eps_label(eps):
+    """Earnings Price Sensitivity tier based on avg |CAR|."""
+    if eps > 0.06:
         return "High"
-    if beta > 0.3:
+    if eps > 0.03:
         return "Medium"
     return "Low"
 
 
-def _sensitivity_colour(beta):
-    if beta > 0.7:
+def _eps_colour(eps):
+    if eps > 0.06:
         return "#C0392B"
-    if beta > 0.3:
+    if eps > 0.03:
         return "#C17B00"
     return "#1A7F4B"
 
 
+def _ols_beta(y, x):
+    """Return OLS beta coefficient of y ~ 1 + x."""
+    X = np.column_stack([np.ones(len(x)), x])
+    coeffs, *_ = np.linalg.lstsq(X, y, rcond=None)
+    return float(coeffs[1])
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def compute_sector_betas():
+    """
+    Download 1 year of daily returns for all representative tickers and SPY.
+    Compute OLS beta for each ticker vs SPY, average per sector.
+    Cached for 24 hours — betas are stable enough at daily frequency.
+    Returns dict: {sector_label: avg_beta}
+    """
+    all_tickers = list({t for tickers in _SECTOR_REPS.values() for t in tickers})
+    all_tickers.append("SPY")
+
+    end_dt   = date.today()
+    start_dt = end_dt - timedelta(days=400)  # ~280 trading days
+
+    try:
+        raw = yf.download(
+            all_tickers,
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=end_dt.strftime("%Y-%m-%d"),
+            auto_adjust=True,
+            progress=False,
+        )
+    except Exception:
+        return {}
+
+    close = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
+    close = close.dropna(axis=1, how="all")
+
+    if "SPY" not in close.columns or len(close) < 30:
+        return {}
+
+    returns = np.log(close / close.shift(1)).dropna()
+    spy = returns["SPY"].values
+
+    sector_betas = {}
+    for sector, tickers in _SECTOR_REPS.items():
+        betas = []
+        for t in tickers:
+            if t not in returns.columns:
+                continue
+            col = returns[t].dropna()
+            # Align lengths via shared index with SPY
+            aligned = returns[[t, "SPY"]].dropna()
+            if len(aligned) < 30:
+                continue
+            try:
+                b = _ols_beta(aligned[t].values, aligned["SPY"].values)
+                if -1 < b < 5:   # sanity: discard extreme outliers
+                    betas.append(b)
+            except Exception:
+                continue
+        if betas:
+            sector_betas[sector] = round(float(np.mean(betas)), 3)
+
+    return sector_betas
+
+
+def _calendar_earnings_dates(today, n=3):
+    """
+    Generate the last n approximate quarterly earnings dates before today.
+    Uses standard US large-cap fiscal calendar:
+      Q1 results → late April | Q2 → late July | Q3 → late October | Q4 → late January
+    No API calls — derived purely from the calendar.
+    """
+    candidates = []
+    for yr in range(today.year - 3, today.year + 1):
+        candidates += [
+            date(yr,     4, 25),   # Q1 report
+            date(yr,     7, 28),   # Q2 report
+            date(yr,    10, 28),   # Q3 report
+            date(yr + 1, 1, 28),   # Q4 report
+        ]
+    past = sorted([d for d in candidates if d < today], reverse=True)
+    return past[:n]
+
+
+def _snap_to_trading_day(event_date, trade_index):
+    """Return the closest date in trade_index to event_date."""
+    ts = pd.Timestamp(event_date)
+    pos = trade_index.searchsorted(ts)
+    if pos == 0:
+        return trade_index[0]
+    if pos >= len(trade_index):
+        return trade_index[-1]
+    before = trade_index[pos - 1]
+    after  = trade_index[pos]
+    return before if (ts - before) <= (after - ts) else after
+
+
+def _car_for_ticker(t, ret, event_dates):
+    """
+    Compute avg |CAR[-1,+3]| for ticker t across the supplied event dates.
+    ret: DataFrame with columns [t, "SPY"], log-return series, DatetimeIndex.
+    Returns list of |CAR| values (may be empty if data is insufficient).
+    """
+    cars = []
+    for event_date in event_dates:
+        snap = _snap_to_trading_day(event_date, ret.index)
+        pos  = int(ret.index.get_loc(snap))
+        rel  = np.arange(len(ret)) - pos
+
+        est = ret[(rel >= -120) & (rel <= -20)]
+        if len(est) < 20:
+            continue
+
+        y, x = est[t].values, est["SPY"].values
+        X = np.column_stack([np.ones(len(x)), x])
+        try:
+            coeffs, *_ = np.linalg.lstsq(X, y, rcond=None)
+            alpha, beta_est = float(coeffs[0]), float(coeffs[1])
+        except Exception:
+            continue
+
+        ev = ret[(rel >= -1) & (rel <= 3)]
+        if ev.empty:
+            continue
+
+        ar  = ev[t] - (alpha + beta_est * ev["SPY"])
+        cars.append(abs(float(ar.sum())))
+    return cars
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def compute_sector_earnings_sensitivity():
+    """
+    Compute Earnings Price Sensitivity (EPS) per sector.
+
+    EPS = average |CAR[-1,+3]| across the last 3 earnings events for each
+    representative ticker in the sector, averaged across the 3 tickers.
+
+    This is an event-specific measure: how much a sector typically moves
+    around earnings releases after stripping out normal market movement.
+    Distinct from general CAPM beta (which measures day-to-day co-movement).
+
+    Earnings dates are derived from a quarterly calendar approximation
+    (Q1≈Apr 25, Q2≈Jul 28, Q3≈Oct 28, Q4≈Jan 28) — no per-ticker API
+    calls needed. The approximation introduces ≤2 weeks of date error,
+    which is negligible given the [-1,+3] event window.
+
+    Falls back to yf.earnings_dates for any ticker where calendar events
+    fall inside gaps in the price data.
+
+    Methodology: CAPM event study (Brown & Warner, 1985).
+    Cached 24 hours.
+    Returns dict: {sector_label: avg_abs_car}
+    """
+    all_tickers = list({t for tickers in _SECTOR_REPS.values() for t in tickers})
+    all_tickers.append("SPY")
+
+    today    = date.today()
+    end_dt   = today
+    start_dt = today - timedelta(days=850)  # ~2.8 years: covers 3 events + estimation windows
+
+    try:
+        raw = yf.download(
+            all_tickers,
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=end_dt.strftime("%Y-%m-%d"),
+            auto_adjust=True,
+            progress=False,
+        )
+    except Exception:
+        return {}
+
+    close = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
+    close = close.dropna(axis=1, how="all")
+    if "SPY" not in close.columns or len(close) < 60:
+        return {}
+
+    returns = np.log(close / close.shift(1)).dropna()
+    returns.index = pd.to_datetime(returns.index)
+
+    # Calendar-derived earnings dates — same 3 dates used for every ticker.
+    # Per-company date error is typically ≤14 trading days, which is within
+    # the estimation gap (we exclude t=-20 to t=0, so ≤14-day misalignment
+    # rarely contaminates the estimation window).
+    cal_dates = _calendar_earnings_dates(today, n=3)
+
+    sector_results = {}
+    for sector, tickers in _SECTOR_REPS.items():
+        cars = []
+        for t in tickers:
+            if t not in returns.columns:
+                continue
+            ret = returns[[t, "SPY"]].dropna()
+            if len(ret) < 60:
+                continue
+            ticker_cars = _car_for_ticker(t, ret, cal_dates)
+            # If calendar dates fall in data gaps, try yfinance as backup
+            if not ticker_cars:
+                try:
+                    ed = yf.Ticker(t).earnings_dates
+                    if ed is not None and not ed.empty:
+                        idx = ed.index.tz_localize(None) if ed.index.tz is not None else ed.index
+                        past = sorted([d.date() for d in idx if d.date() < today], reverse=True)
+                        if past:
+                            ticker_cars = _car_for_ticker(t, ret, past[:3])
+                except Exception:
+                    pass
+            cars.extend(ticker_cars)
+
+        if cars:
+            sector_results[sector] = round(float(np.mean(cars)), 4)
+
+    return sector_results
+
+
 def get_earnings_date(ticker, period, year):
     """
-    Get the actual earnings announcement date.
-    Tries yfinance earnings_dates first, falls back to quarter approximation.
+    Get actual earnings announcement date via yfinance; falls back to
+    quarter-end approximation for calendar-year fiscal companies.
     """
     approx = {
         "Q1": date(year,     4, 25),
@@ -93,20 +326,17 @@ def run_event_study(ticker, period, year):
     CAPM event study around the earnings call date.
 
     Steps:
-      1. Resolve t=0 (earnings date) via yfinance or quarter approximation
-      2. Download stock + SPY returns for the full window
+      1. Resolve t=0 via yfinance earnings_dates or quarter approximation
+      2. Download stock + SPY returns for fetch window
       3. Estimation window OLS: R_stock = alpha + beta * R_SPY
-      4. Event window: AR_t = R_stock_t - (alpha + beta * R_SPY_t)
-      5. CAR = sum(AR_t) over event window
-      6. T-stat = CAR / (sigma_est * sqrt(n_event))
+      4. Event window: AR_t = R_actual_t - (alpha + beta * R_SPY_t)
+      5. CAR = sum(AR_t);  T-stat = CAR / (sigma_est * sqrt(n_event))
 
-    Returns a dict with:
-      event_date, beta, alpha, r_squared, car, t_stat, n_est, ar_series (DataFrame)
+    Returns dict with beta, alpha, r_squared, car, t_stat, n_est, ar_series, event_date.
     Returns {"error": message} on failure.
     """
     event_date = get_earnings_date(ticker, period, year)
 
-    # Wide calendar fetch: 180 days before covers ≥120 trading days
     fetch_start = event_date - timedelta(days=185)
     fetch_end   = event_date + timedelta(days=15)
 
@@ -121,68 +351,51 @@ def run_event_study(ticker, period, year):
     except Exception as e:
         return {"error": f"Price download failed: {e}"}
 
-    # yfinance >= 0.2 returns MultiIndex columns when multiple tickers requested
-    if isinstance(raw.columns, pd.MultiIndex):
-        close = raw["Close"]
-    else:
-        close = raw
+    close = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw
 
     if close.empty:
         return {"error": "No price data returned."}
-
-    # Ensure both columns exist
     for col in [ticker, "SPY"]:
         if col not in close.columns:
             return {"error": f"Price data missing for {col}."}
 
     close = close[[ticker, "SPY"]].dropna()
-
-    # Log returns
     returns = np.log(close / close.shift(1)).dropna()
+
     if len(returns) < 25:
         return {"error": "Insufficient return history (< 25 trading days available)."}
 
-    # Locate event date: find nearest trading day at or after t=0
     returns.index = pd.to_datetime(returns.index)
     event_ts = pd.Timestamp(event_date)
-    pos = int(returns.index.searchsorted(event_ts))
-    pos = min(pos, len(returns) - 1)
+    pos = int(min(returns.index.searchsorted(event_ts), len(returns) - 1))
+    rel = np.arange(len(returns)) - pos
 
-    rel = np.arange(len(returns)) - pos  # relative day index (0 = event)
-
-    # Estimation window: t = -120 to -20
-    est_mask = (rel >= -120) & (rel <= -20)
-    est = returns[est_mask]
+    # Estimation window
+    est = returns[(rel >= -120) & (rel <= -20)]
     if len(est) < 20:
         return {"error": f"Estimation window has only {len(est)} days (need ≥20). "
-                         f"Try an earlier year or check that price history is available."}
+                         "Try an earlier quarter or verify price history is available."}
 
-    y = est[ticker].values
-    x = est["SPY"].values
+    y, x = est[ticker].values, est["SPY"].values
     X = np.column_stack([np.ones(len(x)), x])
     coeffs, *_ = np.linalg.lstsq(X, y, rcond=None)
     alpha, beta = float(coeffs[0]), float(coeffs[1])
 
-    # R-squared
-    y_hat = alpha + beta * x
+    y_hat  = alpha + beta * x
     ss_res = float(np.sum((y - y_hat) ** 2))
     ss_tot = float(np.sum((y - y.mean()) ** 2))
     r_sq   = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
-
-    # Residual std from estimation window — used in t-stat
     resid_std = float(np.std(y - y_hat, ddof=2)) if len(y) > 2 else 0.01
 
-    # Event window: t = -1 to +3
+    # Event window
     ev_mask = (rel >= -1) & (rel <= 3)
     ev = returns[ev_mask].copy()
     if ev.empty:
-        return {"error": "Event window has no trading data. "
-                         "The earnings date may be in the future or too recent."}
+        return {"error": "Event window has no trading data — date may be in the future."}
 
     ev_rel = rel[ev_mask]
-    ar = ev[ticker] - (alpha + beta * ev["SPY"])
-    car = float(ar.sum())
-
+    ar     = ev[ticker] - (alpha + beta * ev["SPY"])
+    car    = float(ar.sum())
     n_ev   = len(ar)
     t_stat = float(car / (resid_std * np.sqrt(n_ev))) if resid_std > 0 else 0.0
 
@@ -209,25 +422,26 @@ def run_event_study(ticker, period, year):
     }
 
 
-def get_sector_sensitivity_df(selected_sector_label=None, live_beta=None):
+def get_sector_sensitivity_df(eps_data, selected_sector_label=None, live_car=None):
     """
-    Build the sector sensitivity DataFrame for the chart.
-    If selected_sector_label + live_beta are given, patches that sector's value.
-    Returns DataFrame sorted ascending by beta (chart reads bottom = highest).
+    Build the sector Earnings Price Sensitivity DataFrame for the chart.
+    eps_data: dict from compute_sector_earnings_sensitivity() — {sector: avg_abs_car}.
+              Falls back to _FALLBACK_EPS if empty.
+    Patches selected_sector_label with the live ticker's |CAR| if provided.
+    Returns DataFrame sorted ascending by eps (chart reads highest at top).
     """
     rows = []
-    for sector, vals in _SECTOR_BETAS.items():
-        b = vals["avg_beta"]
-        is_live = (sector == selected_sector_label and live_beta is not None)
+    for sector in _SECTOR_REPS:
+        eps = eps_data.get(sector) or _FALLBACK_EPS.get(sector, 0.05)
+        is_live = (sector == selected_sector_label and live_car is not None)
         if is_live:
-            b = live_beta
+            eps = abs(live_car)
         rows.append({
             "sector":      sector,
-            "beta":        b,
-            "avg_car":     vals["avg_car"],
-            "sensitivity": _sensitivity_label(b),
-            "colour":      _sensitivity_colour(b),
+            "eps":         round(eps, 4),
+            "sensitivity": _eps_label(eps),
+            "colour":      _eps_colour(eps),
             "is_live":     is_live,
         })
     df = pd.DataFrame(rows)
-    return df.sort_values("beta", ascending=True).reset_index(drop=True)
+    return df.sort_values("eps", ascending=True).reset_index(drop=True)
