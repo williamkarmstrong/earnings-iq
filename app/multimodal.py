@@ -73,30 +73,29 @@ def compute_tone_text_divergence(sentiment_score, audio_features):
     return round(float(divergence), 3)
 
 
-def compute_segment_timeline(enriched_segments, audio_features):
+def compute_segment_timeline(enriched_segments, audio_features, qa_start_time=None):
     """
     Build the intra-call timeline from per-segment FinBERT scores.
-    The acoustic_confidence column now holds the global Wav2Vec2 proxy
-    as a flat reference line -- useful context without misleading per-segment noise.
-    Returns a DataFrame with columns: time_min, sentiment_score,
-    acoustic_confidence, speaker, section.
+    qa_start_time: actual Q&A start in seconds from find_qa_start_time().
+    Falls back to 65% duration heuristic when None.
     """
     if not enriched_segments:
         return pd.DataFrame()
 
     global_proxy = audio_features.get("confidence_proxy", 0.5)
-    # Normalise proxy to [-1,+1] to align with FinBERT axis
     proxy_normalised = round(global_proxy * 2 - 1, 3)
-    max_time = max(s.get("end", 0) for s in enriched_segments)
-    qa_start = max_time * 0.65
+
+    if qa_start_time is None:
+        max_time = max(s.get("end", 0) for s in enriched_segments)
+        qa_start_time = max_time * 0.65
 
     rows = []
     for seg in enriched_segments:
-        section = "Q&A" if seg.get("start", 0) >= qa_start else "Prepared"
+        section = "Q&A" if seg.get("start", 0) >= qa_start_time else "Prepared"
         rows.append({
             "time_min":            round(seg.get("start", 0) / 60, 2),
             "sentiment_score":     round(seg.get("sentiment_score", 0.0), 3),
-            "acoustic_confidence": proxy_normalised,  # flat reference line
+            "acoustic_confidence": proxy_normalised,
             "speaker":             seg.get("speaker", "UNKNOWN"),
             "section":             section,
         })
@@ -104,23 +103,24 @@ def compute_segment_timeline(enriched_segments, audio_features):
     return pd.DataFrame(rows)
 
 
-def compute_section_divergence(enriched_segments, audio_features):
+def compute_section_divergence(enriched_segments, audio_features, qa_start_time=None):
     """
     Section-level tone-text divergence: compare avg FinBERT sentiment
     in Prepared vs Q&A sections against the global Wav2Vec2 proxy.
-    Returns a list of dicts suitable for a bar chart.
+    qa_start_time: actual Q&A start in seconds. Falls back to 65% when None.
     """
     if not enriched_segments:
         return []
 
     global_proxy = audio_features.get("confidence_proxy", 0.5)
-    proxy_norm   = global_proxy * 2 - 1  # to [-1,+1] scale
+    proxy_norm   = global_proxy * 2 - 1
 
-    max_time = max(s.get("end", 0) for s in enriched_segments)
-    qa_start = max_time * 0.65
+    if qa_start_time is None:
+        max_time = max(s.get("end", 0) for s in enriched_segments)
+        qa_start_time = max_time * 0.65
 
-    prep_scores = [s.get("sentiment_score", 0.0) for s in enriched_segments if s.get("start", 0) < qa_start]
-    qa_scores   = [s.get("sentiment_score", 0.0) for s in enriched_segments if s.get("start", 0) >= qa_start]
+    prep_scores = [s.get("sentiment_score", 0.0) for s in enriched_segments if s.get("start", 0) < qa_start_time]
+    qa_scores   = [s.get("sentiment_score", 0.0) for s in enriched_segments if s.get("start", 0) >= qa_start_time]
 
     rows = []
     for label, scores in [("Prepared", prep_scores), ("Q&A", qa_scores)]:
@@ -135,43 +135,59 @@ def compute_section_divergence(enriched_segments, audio_features):
     return rows
 
 
-def compute_speaker_mci(enriched_segments, audio_features):
+def compute_speaker_mci(enriched_segments, audio_features, qa_start_time=None):
     """
     Break MCI down by speaker and section (prepared vs. Q&A).
-    Uses the same weighting as compute_mci applied to per-speaker
-    average sentiment, with global audio features shared.
+    Uses word-count-weighted sentiment per speaker so short filler phrases
+    ("Thank you", "Sure") don't dilute information-rich remarks.
+    Global audio features are shared across speakers.
     Returns a list of dicts for the speaker attribution panel.
     """
     from collections import defaultdict
 
-    max_time = max((s.get("end", 0) for s in enriched_segments), default=0)
-    qa_start = max_time * 0.65
+    if qa_start_time is None:
+        max_time = max((s.get("end", 0) for s in enriched_segments), default=0)
+        qa_start_time = max_time * 0.65
 
+    # Store (sentiment_score, word_count) per (speaker, section)
     groups = defaultdict(list)
     for seg in enriched_segments:
-        section = "Q&A" if seg.get("start", 0) >= qa_start else "Prepared"
-        key = (seg.get("speaker", "UNKNOWN"), section)
-        groups[key].append(seg.get("sentiment_score", 0.0))
+        section    = "Q&A" if seg.get("start", 0) >= qa_start_time else "Prepared"
+        key        = (seg.get("speaker", "UNKNOWN"), section)
+        word_count = len(seg.get("text", "").split())
+        groups[key].append((seg.get("sentiment_score", 0.0), word_count))
 
     results = []
-    for (speaker, section), scores in groups.items():
-        avg_sentiment = float(np.mean(scores))
-        mci = compute_mci(avg_sentiment, audio_features)
+    for (speaker, section), pairs in groups.items():
+        total_words = sum(w for _, w in pairs)
+        # Word-count weighted average, min 8 words to qualify
+        qualifying = [(s, w) for s, w in pairs if w >= 8]
+        if qualifying:
+            total_q_w = sum(w for _, w in qualifying)
+            avg_sentiment = sum(s * w for s, w in qualifying) / total_q_w if total_q_w > 0 else 0.0
+        else:
+            avg_sentiment = float(np.mean([s for s, _ in pairs]))
+
+        mci = compute_mci(float(avg_sentiment), audio_features)
         results.append({
             "speaker":       speaker,
             "section":       section,
             "mci":           mci,
-            "avg_sentiment": round(avg_sentiment, 3),
+            "avg_sentiment": round(float(avg_sentiment), 3),
+            "word_count":    total_words,
+            "n_segments":    len(pairs),
         })
 
     results.sort(key=lambda x: (x["section"], x["speaker"]))
     return results
 
 
-def analyse_multimodal(text_sentiment, audio_features, enriched_segments=None):
+def analyse_multimodal(text_sentiment, audio_features, enriched_segments=None, qa_start_time=None):
     """
     Main entry point — runs all multimodal computations and returns
     a single result dict that insights.py and app.py consume.
+    qa_start_time: actual Q&A start in seconds from find_qa_start_time().
+    Pass this so all section splits use the real transition time, not 65%.
     """
     mci        = compute_mci(text_sentiment, audio_features)
     text_mci   = compute_text_mci(text_sentiment)
@@ -186,8 +202,8 @@ def analyse_multimodal(text_sentiment, audio_features, enriched_segments=None):
     }
 
     if enriched_segments:
-        result["timeline"]           = compute_segment_timeline(enriched_segments, audio_features)
-        result["speaker_breakdown"]  = compute_speaker_mci(enriched_segments, audio_features)
-        result["section_divergence"] = compute_section_divergence(enriched_segments, audio_features)
+        result["timeline"]           = compute_segment_timeline(enriched_segments, audio_features, qa_start_time)
+        result["speaker_breakdown"]  = compute_speaker_mci(enriched_segments, audio_features, qa_start_time)
+        result["section_divergence"] = compute_section_divergence(enriched_segments, audio_features, qa_start_time)
 
     return result
