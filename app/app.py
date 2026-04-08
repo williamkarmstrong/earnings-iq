@@ -17,19 +17,40 @@ import yfinance as yf
 import html as _html_lib
 
 from ingestion import fetch_backup_transcript, fetch_audio, fetch_transcript_cached
-from event_study import run_event_study, get_sector_sensitivity_df
-from speech import transcribe_audio, map_speakers, resolve_speaker_names
+from event_study import run_event_study, get_sector_sensitivity_df, compute_sector_earnings_sensitivity
+from speech import transcribe_audio, map_speakers, resolve_speaker_names, is_management_speaker
 from nlp import (
     analyse_segments, analyse_sentiment, get_hedging_frequency,
     split_prepared_vs_qa, get_top_keywords, extract_key_insights,
     extract_talking_points, analyse_transcript_text, compute_nsi,
-    parse_av_speakers, _finbert_available,
+    parse_av_speakers, _finbert_available, compute_text_qa_stress,
+    weighted_segment_mean, find_qa_start_time,
 )
 from audio import extract_audio_features, _wav2vec2_available
 from multimodal import analyse_multimodal
-from insights import generate_insights
+from insights import generate_insights, get_peer_tickers, SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
 
 st.set_page_config(page_title="EarningsIQ", layout="wide")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _analyse_peer(peer_ticker, period, year):
+    """
+    Fetch and analyse a peer ticker's transcript for the given quarter.
+    Returns dict with mci, qa_stress, signal — or None on failure.
+    Cached 24h so repeat runs use local cache, not API credits.
+    """
+    try:
+        text, err = fetch_transcript_cached(peer_ticker, period, year)
+        if not text:
+            return None
+        stats    = analyse_transcript_text(text)
+        text_mci = round(((stats["sentiment"] + 1) / 2) * 100, 1)
+        qa_stress = compute_text_qa_stress(text)
+        signal   = "Positive" if text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if text_mci <= SIGNAL_MCI_WATCH else "Neutral"
+        return {"mci": text_mci, "qa_stress": qa_stress, "signal": signal}
+    except Exception:
+        return None
 
 
 @st.cache_data
@@ -257,20 +278,37 @@ else:
     call_duration_min = 0.0
     is_full_call = False
 
+# Filter to management-only segments for MCI and Q&A analysis.
+# Confirmed analysts (is_management_speaker=False) are excluded.
+# Unresolved/ambiguous speakers (None) are kept so short clips aren't left empty.
+if enriched_segments:
+    _mgmt = [s for s in enriched_segments if is_management_speaker(s.get("speaker", "")) is not False]
+    management_segments = _mgmt if _mgmt else enriched_segments
+else:
+    management_segments = []
+
+# Detect Q&A start from ALL segments (including operator turns) so the
+# operator's transition announcement is not missed after management filtering.
+qa_start_time = find_qa_start_time(enriched_segments) if enriched_segments else None
+
 # Multimodal fusion
 status.text("Multimodal analysis...")
 try:
-    if enriched_segments:
-        overall_sentiment = float(np.mean([s["sentiment_score"] for s in enriched_segments]))
-        current_positive  = float(np.mean([s.get("positive", 0.0) for s in enriched_segments]))
-        current_negative  = float(np.mean([s.get("negative", 0.0) for s in enriched_segments]))
+    if management_segments:
+        overall_sentiment = weighted_segment_mean(management_segments, "sentiment_score")
+        current_positive  = weighted_segment_mean(management_segments, "positive")
+        current_negative  = weighted_segment_mean(management_segments, "negative")
     else:
         _sent = analyse_sentiment(transcript_text or "")
         overall_sentiment = _sent["score"]
         current_positive  = _sent["positive"]
         current_negative  = _sent["negative"]
 
-    multimodal_result = analyse_multimodal(overall_sentiment, audio_features, enriched_segments or None)
+    multimodal_result = analyse_multimodal(
+        overall_sentiment, audio_features,
+        management_segments or None,
+        qa_start_time=qa_start_time,
+    )
 except Exception as e:
     pipeline_warnings.append(f"Multimodal fusion failed: {e}")
     multimodal_result = {"mci": 50, "tone_text_divergence": 0.0,
@@ -284,33 +322,34 @@ progress.progress(88)
 # Insights
 status.text("Generating insights...")
 try:
-    hedge_data    = get_hedging_frequency(enriched_segments) if enriched_segments else {"frequency_per_100": 0}
-    prepared_segs, qa_segs = split_prepared_vs_qa(enriched_segments)
-    prepared_sentiment = float(pd.DataFrame(prepared_segs)["sentiment_score"].mean()) if prepared_segs else None
-    qa_sentiment       = float(pd.DataFrame(qa_segs)["sentiment_score"].mean())       if qa_segs       else None
+    hedge_data = get_hedging_frequency(management_segments) if management_segments else {"frequency_per_100": 0}
+    # Pass all enriched_segments as search source so operator's Q&A announcement is found
+    prepared_segs, qa_segs = split_prepared_vs_qa(management_segments, search_segments=enriched_segments)
+    prepared_sentiment = weighted_segment_mean(prepared_segs, "sentiment_score") if prepared_segs else None
+    qa_sentiment       = weighted_segment_mean(qa_segs,       "sentiment_score") if qa_segs       else None
     insights = generate_insights(multimodal_result, hedge_data, prepared_sentiment, qa_sentiment, ticker)
 except Exception as e:
     pipeline_warnings.append(f"Insight generation failed: {e}")
     insights = {
         "mci": 50, "mci_label": "N/A", "tone_text_divergence": 0.0, "divergence_label": "N/A",
         "qa_decay": 0.0, "qa_stress": "N/A", "hedge_frequency": 0.0,
-        "flags": [], "timeline": pd.DataFrame(), "speaker_breakdown": [], "peer_data": pd.DataFrame(),
+        "flags": [], "timeline": pd.DataFrame(), "speaker_breakdown": [], "peer_data": pd.DataFrame(), "peer_tickers": [], "peer_sector": "Peer Group",
     }
     prepared_segs = qa_segs = []
 
 # Talking points, keywords, key insights
 try:
-    talking_points = extract_talking_points(enriched_segments or None, transcript_text, n=6)
+    talking_points = extract_talking_points(management_segments or None, transcript_text, n=6)
 except Exception:
     talking_points = []
 
 try:
-    key_insights = extract_key_insights(enriched_segments, n=3)
+    key_insights = extract_key_insights(management_segments, n=5)
 except Exception:
-    key_insights = {"highlights": [], "risk_signals": [], "hedging_moments": []}
+    key_insights = {"highlights": [], "risk_signals": []}
 
 try:
-    keywords = get_top_keywords(enriched_segments, transcript_text, n=15)
+    keywords = get_top_keywords(management_segments, transcript_text, n=15)
 except Exception:
     keywords = []
 
@@ -350,20 +389,56 @@ for prev_period, prev_year in prev_quarters:
 # Narrative Shift Index -- sigma vs prior history
 nsi = compute_nsi(current_stats, historical_stats)
 
-# Patch peer df with live values for the selected ticker.
-# MCI is patched with text_mci (FinBERT-only) so the comparison is fair --
-# all peer MCIs are illustrative text-derived values; mixing in audio for
-# the selected ticker creates an apples-to-oranges comparison.
-try:
-    _peer_df = insights["peer_data"]
-    _sel_mask = _peer_df["is_selected"]
-    _text_mci = multimodal_result.get("text_mci", round(((overall_sentiment + 1) / 2) * 100, 1))
-    _peer_df.loc[_sel_mask, "mci"]       = _text_mci
-    _peer_df.loc[_sel_mask, "nsi_sigma"] = round(nsi.get("nsi_sigma", 0.0), 2)
-    _peer_df.loc[_sel_mask, "qa_stress"] = round(insights.get("qa_decay", 0.0), 2)
+# Build real peer comparison DataFrame by fetching/analysing peer transcripts.
+# Uses st.cache_data so previously-analysed tickers load instantly.
+_peer_tickers = insights.get("peer_tickers", [])
+_live_text_mci = multimodal_result.get("text_mci", round(((overall_sentiment + 1) / 2) * 100, 1))
+_live_qa_stress = round(insights.get("qa_decay", 0.0), 3)
+_live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci <= SIGNAL_MCI_WATCH else "Neutral"
+
+_peer_rows = []
+for _pt in _peer_tickers:
+    if _pt.upper() == ticker.upper():
+        _peer_rows.append({
+            "ticker":      ticker.upper(),
+            "mci":         _live_text_mci,
+            "qa_stress":   _live_qa_stress,
+            "signal":      _live_signal,
+            "is_selected": True,
+        })
+    else:
+        _res = _analyse_peer(_pt, period, year)
+        if _res:
+            _peer_rows.append({
+                "ticker":      _pt.upper(),
+                "mci":         _res["mci"],
+                "qa_stress":   _res["qa_stress"],
+                "signal":      _res["signal"],
+                "is_selected": False,
+            })
+        else:
+            _peer_rows.append({
+                "ticker":      _pt.upper(),
+                "mci":         None,
+                "qa_stress":   None,
+                "signal":      "N/A",
+                "is_selected": False,
+            })
+
+if _peer_rows:
+    _peer_df = pd.DataFrame(_peer_rows)
+    _peer_df = _peer_df.sort_values(
+        "mci",
+        ascending=False,
+        key=lambda s: s.fillna(-1)
+    ).reset_index(drop=True)
+    _peer_df["rank"] = _peer_df.index + 1
+    _valid_mci = _peer_df.loc[~_peer_df["is_selected"] & _peer_df["mci"].notna(), "mci"]
+    _peer_avg = _valid_mci.mean() if not _valid_mci.empty else _live_text_mci
+    _peer_df["delta_vs_peers"] = (_peer_df["mci"] - _peer_avg).round(1)
     insights["peer_data"] = _peer_df
-except Exception:
-    pass
+else:
+    insights["peer_data"] = pd.DataFrame()
 
 progress.progress(100)
 status.empty()
@@ -413,160 +488,30 @@ def _key_takeaways(flags, nsi, overall_sentiment, hedge_val):
 # DASHBOARD
 # ============================================================
 
-# --- CSS ---
-st.markdown("""
-<style>
-[data-testid="stAppViewContainer"] { font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif; }
-
-/* ---- Global ---- */
-.iq-lbl { font-size:0.68rem; font-weight:700; letter-spacing:0.12em; text-transform:uppercase;
-          color:#4A5568; border-bottom:1px solid #CBD5E0; padding-bottom:3px; margin-bottom:8px; }
-
-/* ---- Header ---- */
-.iq-hdr { background:#0D1B2A; border-radius:6px; padding:12px 20px;
-          display:flex; align-items:center; gap:16px; margin-bottom:14px; }
-.iq-hdr-tk  { font-size:1.5rem; font-weight:700; color:#FFF; letter-spacing:0.04em; }
-.iq-hdr-sub { font-size:0.78rem; color:#7A90A8; text-transform:uppercase; letter-spacing:0.07em; }
-.iq-hdr-badge { font-size:0.70rem; background:#1E3A5F; color:#7EBAFF;
-                padding:2px 9px; border-radius:3px; margin-left:auto; }
-
-/* ---- Takeaways ---- */
-.iq-tk { display:flex; align-items:flex-start; gap:10px;
-         padding:8px 12px; border-radius:4px; margin-bottom:5px; }
-.iq-tk.high   { background:#FDF0EF; border-left:3px solid #C0392B; }
-.iq-tk.medium { background:#FEF9EC; border-left:3px solid #C17B00; }
-.iq-tk.low    { background:#EEF7F1; border-left:3px solid #1A7F4B; }
-.iq-tk-pill { font-size:0.60rem; font-weight:700; text-transform:uppercase;
-              padding:1px 6px; border-radius:2px; white-space:nowrap; margin-top:1px; }
-.iq-tk.high   .iq-tk-pill { background:#C0392B; color:#FFF; }
-.iq-tk.medium .iq-tk-pill { background:#C17B00; color:#FFF; }
-.iq-tk.low    .iq-tk-pill { background:#1A7F4B; color:#FFF; }
-.iq-tk-msg { font-size:0.82rem; color:#1A2533; font-weight:500; line-height:1.35; }
-
-/* ---- KPI cards ---- */
-.iq-kpi { background:#0D1B2A; border-radius:5px; padding:14px 16px; height:100%;
-          border-bottom:3px solid #1565C0; }
-.iq-kpi.ok    { border-bottom-color:#1A7F4B; }
-.iq-kpi.warn  { border-bottom-color:#C17B00; }
-.iq-kpi.alert { border-bottom-color:#C0392B; }
-.iq-kpi-lbl { font-size:0.65rem; font-weight:600; text-transform:uppercase;
-              letter-spacing:0.12em; color:#7A90A8; margin-bottom:4px; }
-.iq-kpi-val { font-size:1.55rem; font-weight:700; color:#FFFFFF;
-              font-family:'Courier New',monospace; line-height:1.1; }
-.iq-kpi-sub { font-size:0.68rem; color:#4A6080; margin-top:3px; }
-
-/* ---- Signal cards ---- */
-.iq-sig { border:1px solid #D8DFE8; border-radius:5px; padding:11px 14px;
-          margin-bottom:7px; background:#FAFBFC; }
-.iq-sig.high   { border-left:4px solid #C0392B; }
-.iq-sig.medium { border-left:4px solid #C17B00; }
-.iq-sig.low    { border-left:4px solid #1A7F4B; }
-.iq-sig-head { display:flex; align-items:center; gap:8px; margin-bottom:4px; }
-.iq-sig-title { font-size:0.83rem; font-weight:700; color:#0D1B2A; flex:1; }
-.iq-sig-pill { font-size:0.60rem; font-weight:700; text-transform:uppercase;
-               padding:1px 7px; border-radius:2px; }
-.iq-sig.high   .iq-sig-pill { background:#FDE8E8; color:#C0392B; }
-.iq-sig.medium .iq-sig-pill { background:#FEF3CD; color:#C17B00; }
-.iq-sig.low    .iq-sig-pill { background:#E8F5EE; color:#1A7F4B; }
-.iq-sig-why { font-size:0.76rem; color:#4A5568; margin-bottom:4px; line-height:1.3; }
-.iq-sig-meta { font-size:0.68rem; color:#8A9BB0; display:flex; gap:12px; }
-.iq-sig-meta span { display:inline-flex; align-items:center; gap:3px; }
-
-/* ---- Talking points ---- */
-.iq-tp { display:flex; align-items:flex-start; gap:10px;
-         padding:8px 11px; border-bottom:1px solid #E8ECF0; font-size:0.82rem; line-height:1.35; }
-.iq-tp:last-child { border-bottom:none; }
-.iq-tp-rank { font-size:0.65rem; color:#8A9BB0; font-weight:700; min-width:16px; padding-top:2px; }
-.iq-tp-bar  { min-width:48px; padding-top:5px; }
-.iq-tp-bg   { background:#E2E8F0; border-radius:2px; height:5px; width:48px; }
-.iq-tp-fill { height:5px; border-radius:2px; }
-.iq-tp-score { font-size:0.70rem; font-family:'Courier New',monospace; font-weight:700;
-               min-width:44px; text-align:right; padding-top:1px; }
-.iq-tp-body { flex:1; color:#1A2533; }
-.iq-tp-spk  { font-size:0.65rem; color:#6B7D8F; margin-top:2px; }
-.iq-tp-time { font-size:0.65rem; color:#8A9BB0; min-width:40px; text-align:right; padding-top:2px; }
-
-/* ---- Insight rows ---- */
-.iq-ins { padding:9px 12px; border-radius:4px; margin-bottom:5px; }
-.iq-ins.pos { background:#EEF7F1; border-left:3px solid #1A7F4B; }
-.iq-ins.neg { background:#FDF0EF; border-left:3px solid #C0392B; }
-.iq-ins.hdg { background:#FEF9EC; border-left:3px solid #C17B00; }
-.iq-ins-score { font-family:'Courier New',monospace; font-weight:700; font-size:0.72rem; }
-.iq-ins-text  { font-size:0.80rem; color:#1A2533; margin-top:3px; line-height:1.3; }
-.iq-ins-meta  { font-size:0.66rem; color:#6B7D8F; margin-top:3px; display:flex; gap:10px; }
-
-/* ---- Peer cards ---- */
-.iq-peer-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:8px; }
-.iq-peer { background:#F7F9FC; border:1px solid #D8DFE8; border-radius:5px;
-           padding:10px 12px; text-align:center; }
-.iq-peer.selected { background:#0D1B2A; border-color:#1565C0; }
-.iq-peer-tk   { font-size:0.75rem; font-weight:700; color:#0D1B2A; letter-spacing:0.06em; }
-.iq-peer.selected .iq-peer-tk { color:#7EBAFF; }
-.iq-peer-mci  { font-size:1.2rem; font-weight:700; font-family:'Courier New',monospace;
-                margin:3px 0; }
-.iq-peer-sub  { font-size:0.62rem; color:#8A9BB0; }
-.iq-peer.selected .iq-peer-sub { color:#4A6080; }
-.iq-peer-sig  { font-size:0.60rem; font-weight:700; text-transform:uppercase;
-                padding:1px 5px; border-radius:2px; margin-top:4px; display:inline-block; }
-.sig-live     { background:#1E3A5F; color:#7EBAFF; }
-.sig-positive { background:#E8F5EE; color:#1A7F4B; }
-.sig-neutral  { background:#EDF2F7; color:#4A5568; }
-.sig-watch    { background:#FEF3CD; color:#C17B00; }
-
-/* ---- Peer table ---- */
-.iq-peer-tbl { width:100%; border-collapse:collapse; font-size:0.76rem;
-               font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; }
-.iq-peer-tbl th { background:#070F17; color:#4A6080; font-weight:600; font-size:0.63rem;
-                  text-transform:uppercase; letter-spacing:0.09em; padding:8px 12px;
-                  border-bottom:1px solid #1E3A5F; white-space:nowrap; }
-.iq-peer-tbl th:first-child { text-align:left; }
-.iq-peer-tbl th:not(:first-child) { text-align:right; }
-.iq-peer-tbl td { padding:7px 12px; border-bottom:1px solid #0A141E; color:#CBD5E0; white-space:nowrap; }
-.iq-peer-tbl td:first-child { text-align:left; }
-.iq-peer-tbl td:not(:first-child) { text-align:right; }
-.iq-peer-tbl tr.sel-row { background:#0D1B2A; }
-.iq-peer-tbl tr:not(.sel-row) { background:#070F17; }
-.iq-peer-tbl .pt-rank { color:#2D4A6A; font-size:0.65rem; width:28px; }
-.iq-peer-tbl .pt-tk   { font-weight:700; color:#FFFFFF; }
-.iq-peer-tbl .pt-live { color:#4A9EE8; font-size:0.58rem; vertical-align:middle;
-                         margin-right:4px; }
-</style>
-""", unsafe_allow_html=True)
-
 # ================================================================
 # BUILD RENDER DATA
 # ================================================================
-mci_val   = insights["mci"]
-div_val   = insights["tone_text_divergence"]
-hedge_val = insights["hedge_frequency"]
-nsi_sigma = nsi.get("nsi_sigma", 0.0)
-nsi_n     = nsi.get("n_quarters", 0)
-timeline_df = insights["timeline"]
-
-def _cls(v, hi=75, lo=55, inv=False):
-    if inv: hi, lo = lo, hi
-    if v >= hi: return "ok" if not inv else "alert"
-    if v >= lo: return "warn"
-    return "alert" if not inv else "ok"
-
+mci_val       = insights["mci"]
+div_val       = insights["tone_text_divergence"]
+hedge_val     = insights["hedge_frequency"]
+nsi_sigma     = nsi.get("nsi_sigma", 0.0)
+nsi_n         = nsi.get("n_quarters", 0)
+timeline_df   = insights["timeline"]
 qa_stress_val = insights.get("qa_decay", 0.0)
 
-# Header mode
 if transcript_only or not enriched_segments:
     mode_badge, mode_src = "TRANSCRIPT", "Alpha Vantage"
 else:
-    src = "Cache" if audio_result and "cache/" in audio_result else "YouTube"
+    src        = "EarningsCallBiz" if audio_result and "cache/" in audio_result else "YouTube fallback"
     mode_badge = "MULTIMODAL"
     mode_src   = f"{src} + Whisper | {call_duration_min:.0f} min"
 
 # ================================================================
 # HEADER
 # ================================================================
-st.markdown(f"""<div class="iq-hdr">
-  <span class="iq-hdr-tk">{ticker}</span>
-  <span class="iq-hdr-sub">{period} {year} &nbsp;|&nbsp; Earnings Call Analysis &nbsp;|&nbsp; {mode_src}</span>
-  <span class="iq-hdr-badge">{mode_badge}</span>
-</div>""", unsafe_allow_html=True)
+st.title(f"{ticker}  ·  {period} {year} Earnings Call Analysis")
+st.caption(f"{mode_badge}  ·  {mode_src}")
+st.divider()
 
 # ================================================================
 # SECTION 1: KEY TAKEAWAYS + KPI BAR
@@ -574,149 +519,89 @@ st.markdown(f"""<div class="iq-hdr">
 tk_col, kpi_col = st.columns([1, 2.2])
 
 with tk_col:
-    st.markdown('<div class="iq-lbl">Key Takeaways</div>', unsafe_allow_html=True)
+    st.subheader("Key Takeaways")
     takeaways = _key_takeaways(insights["flags"], nsi, overall_sentiment, hedge_val)
-    tk_html = ""
     for sev, msg in takeaways:
-        lbl = {"high":"HIGH","medium":"MEDIUM","low":"CLEAR"}[sev]
-        tk_html += f"""<div class="iq-tk {sev}">
-          <span class="iq-tk-pill">{lbl}</span>
-          <span class="iq-tk-msg">{msg}</span>
-        </div>"""
-    st.markdown(tk_html, unsafe_allow_html=True)
+        if sev == "high":
+            st.error(msg)
+        elif sev == "medium":
+            st.warning(msg)
+        else:
+            st.success(msg)
 
 with kpi_col:
-    st.markdown('<div class="iq-lbl">Summary Metrics</div>', unsafe_allow_html=True)
-    k1,k2,k3,k4,k5 = st.columns(5)
-    with k1:
-        cls = _cls(mci_val)
-        col = "#1A7F4B" if cls=="ok" else "#C17B00" if cls=="warn" else "#C0392B"
-        st.markdown(f"""<div class="iq-kpi {cls}">
-          <div class="iq-kpi-lbl">MCI</div>
-          <div class="iq-kpi-val" style="color:{col}">{mci_val}</div>
-          <div class="iq-kpi-sub">{insights['mci_label']}</div>
-        </div>""", unsafe_allow_html=True)
-    with k2:
-        col = "#1A7F4B" if overall_sentiment>=0.05 else "#C0392B" if overall_sentiment<=-0.05 else "#7A90A8"
-        st.markdown(f"""<div class="iq-kpi">
-          <div class="iq-kpi-lbl">Tone Sentiment</div>
-          <div class="iq-kpi-val" style="color:{col}">{overall_sentiment:+.2f}</div>
-          <div class="iq-kpi-sub">FinBERT net score</div>
-        </div>""", unsafe_allow_html=True)
-    with k3:
-        dcls = "alert" if div_val<-0.12 else "warn" if div_val<-0.05 else "ok"
-        dcol = "#C0392B" if div_val<-0.05 else "#1A7F4B"
-        st.markdown(f"""<div class="iq-kpi {dcls}">
-          <div class="iq-kpi-lbl">Tone-Text Div.</div>
-          <div class="iq-kpi-val" style="color:{dcol}">{div_val:+.2f}</div>
-          <div class="iq-kpi-sub">{insights['divergence_label']}</div>
-        </div>""", unsafe_allow_html=True)
-    with k4:
-        ncls = "alert" if nsi_sigma<-1 else "warn" if nsi_sigma<-0.5 else "ok" if nsi_sigma>0.5 else ""
-        ncol = "#C0392B" if nsi_sigma<-0.5 else "#1A7F4B" if nsi_sigma>0.5 else "#7A90A8"
-        st.markdown(f"""<div class="iq-kpi {ncls}">
-          <div class="iq-kpi-lbl">NSI</div>
-          <div class="iq-kpi-val" style="color:{ncol}">{nsi_sigma:+.2f}σ</div>
-          <div class="iq-kpi-sub">vs {nsi_n}Q history</div>
-        </div>""", unsafe_allow_html=True)
-    with k5:
-        qcls = "alert" if qa_stress_val>0.20 else "warn" if qa_stress_val>0.10 else "ok"
-        qcol = "#C0392B" if qa_stress_val>0.20 else "#C17B00" if qa_stress_val>0.10 else "#1A7F4B"
-        qa_lbl = "High" if qa_stress_val>0.20 else "Moderate" if qa_stress_val>0.10 else "Low"
-        st.markdown(f"""<div class="iq-kpi {qcls}">
-          <div class="iq-kpi-lbl">Q&A Stress</div>
-          <div class="iq-kpi-val" style="color:{qcol}">{qa_stress_val:+.2f}</div>
-          <div class="iq-kpi-sub">{qa_lbl} decay</div>
-        </div>""", unsafe_allow_html=True)
+    st.subheader("Summary Metrics")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("MCI", mci_val, help="Management Confidence Index [0–100]")
+    k2.metric("Transcript Sentiment", f"{overall_sentiment:+.2f}", help="FinBERT net score")
+    if transcript_only or not audio_features.get("wav2vec2_raw_norm"):
+        k3.metric("Tone-Text Div.", "N/A", help="Audio required")
+    else:
+        k3.metric("Tone-Text Div.", f"{div_val:+.2f}", help=insights["divergence_label"])
+    k4.metric("NSI", f"{nsi_sigma:+.2f}σ", help=f"Narrative Shift Index vs {nsi_n}Q history")
+    k5.metric("Q&A Stress", f"{qa_stress_val:+.2f}", help="Sentiment decay from prepared remarks to Q&A")
 
-st.markdown("<br>", unsafe_allow_html=True)
-
-# Audio features transparency -- only in audio mode
 if not transcript_only and enriched_segments:
-    _cp   = audio_features.get("confidence_proxy", 0.5)
-    _pr   = audio_features.get("pause_ratio", 0.0)
-    _rn   = audio_features.get("wav2vec2_raw_norm", None)
-    _pm   = audio_features.get("pitch_mean", 0.0)
-    _ps   = audio_features.get("pitch_std", 0.0)
-    _cv   = round(_ps / _pm, 3) if _pm > 0 else 0.0
-    _rn_str = f" (raw norm {_rn:.1f})" if _rn is not None else ""
-    st.markdown(
-        '<div class="iq-lbl">Audio Signal Sources</div>'
-        f'<p style="font-size:0.73rem;color:#6B7D8F;margin:0 0 14px 0;line-height:1.7;">'
-        f'<strong style="color:#CBD5E0;">Text Sentiment</strong> &mdash; FinBERT {overall_sentiment:+.3f} &nbsp;&bull;&nbsp; 40% of MCI'
-        f'&nbsp;&nbsp;<strong style="color:#CBD5E0;">Vocal Confidence</strong> &mdash; Wav2Vec2 proxy {_cp:.3f}{_rn_str} &nbsp;&bull;&nbsp; 35% of MCI'
-        f'&nbsp;&nbsp;<strong style="color:#CBD5E0;">Pause Density</strong> &mdash; pause ratio {_pr:.3f} &nbsp;&bull;&nbsp; 15% of MCI'
-        f'&nbsp;&nbsp;<strong style="color:#CBD5E0;">Pitch Stability</strong> &mdash; pitch CV {_cv:.3f} (mean {_pm:.0f} Hz) &nbsp;&bull;&nbsp; 10% of MCI'
-        f'</p>',
-        unsafe_allow_html=True,
-    )
+    _cp  = audio_features.get("confidence_proxy", 0.5)
+    _pr  = audio_features.get("pause_ratio", 0.0)
+    _rn  = audio_features.get("wav2vec2_raw_norm")
+    _pm  = audio_features.get("pitch_mean", 0.0)
+    _ps  = audio_features.get("pitch_std", 0.0)
+    _cv  = round(_ps / _pm, 3) if _pm > 0 else 0.0
+    with st.expander("Audio Signal Sources"):
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Text Sentiment", f"{overall_sentiment:+.3f}", help="FinBERT net score · 40% of MCI")
+        _rn_help = f", raw norm {_rn:.1f}" if _rn else ""
+        a2.metric("Vocal Confidence", f"{_cp:.3f}", help=f"Wav2Vec2 proxy{_rn_help} · 35% of MCI")
+        a3.metric("Pause Density", f"{_pr:.3f}", help="Pause ratio · 15% of MCI")
+        a4.metric("Pitch Stability", f"{_cv:.3f}", help=f"Pitch CV (mean {_pm:.0f} Hz) · 10% of MCI")
+
+st.divider()
 
 # ================================================================
 # SECTION 2: ANALYST SIGNALS + TALKING POINTS
 # ================================================================
 sig_col, tp_col = st.columns([1, 1.6])
 
-_why_map = {
-    "high":   "Indicates a material risk to forward earnings confidence.",
-    "medium": "Watch for confirmation in subsequent quarters.",
-    "low":    "Supporting signal - broadly consistent with prior guidance.",
-}
+_has_audio = not transcript_only and bool(audio_features.get("wav2vec2_raw_norm"))
+_visible_flags = [
+    f for f in insights["flags"]
+    if _has_audio or "divergence" not in f.get("message", "").lower()
+]
 
 with sig_col:
-    st.markdown('<div class="iq-lbl">Analyst Signals</div>', unsafe_allow_html=True)
-    if insights["flags"]:
-        for flag in insights["flags"]:
+    st.subheader("Analyst Signals")
+    if _visible_flags:
+        for flag in _visible_flags:
             sev  = flag["severity"]
-            attr = _esc(flag.get("attribution", ""))
-            msg  = _esc(flag["message"])
-            why  = _esc(_why_map.get(sev, ""))
-            lbl  = sev.upper()
-            spk_tag = ""
-            for sp_kw in ["CEO", "CFO", "COO", "Analyst", "Management"]:
-                if sp_kw.lower() in flag.get("attribution", "").lower():
-                    spk_tag = f'<span>&#128100; {sp_kw}</span>'
-                    break
-            st.markdown(
-                f'<div class="iq-sig {sev}">'
-                f'<div class="iq-sig-head"><span class="iq-sig-title">{msg}</span>'
-                f'<span class="iq-sig-pill">{lbl}</span></div>'
-                f'<div class="iq-sig-why">{why}</div>'
-                f'<div class="iq-sig-meta"><span>&#128204; {attr}</span>{spk_tag}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            msg  = flag["message"]
+            attr = flag.get("attribution", "")
+            body = f"**{msg}**\n\n{attr}" if attr else f"**{msg}**"
+            if sev == "high":
+                st.error(body)
+            elif sev == "medium":
+                st.warning(body)
+            else:
+                st.success(body)
     else:
-        st.caption("No signals generated.")
+        extra = "" if _has_audio else " Enable audio mode for divergence signals."
+        st.caption(f"No signals generated.{extra}")
 
 with tp_col:
-    st.markdown('<div class="iq-lbl">Key Talking Points -- positive to negative</div>', unsafe_allow_html=True)
+    st.subheader("Key Talking Points")
     if talking_points:
         sorted_tp = sorted(talking_points, key=lambda x: x["sentiment"], reverse=True)
-        rows = ""
         for i, tp in enumerate(sorted_tp, 1):
             score    = tp["sentiment"]
-            bar_pct  = int(abs(score) * 100)
-            bar_col  = "#1A7F4B" if score >= 0 else "#C0392B"
-            time_str = f"{tp['time_min']} min" if tp.get("time_min") is not None else ""
+            time_str = f"{tp["time_min"]} min" if tp.get("time_min") is not None else ""
             spk = _speaker_for_time(
-                enriched_segments, tp.get("time_min") or 0,
+                management_segments, tp.get("time_min") or 0,
                 fallback_turns=av_turns, text=tp.get("text", ""),
             )
-            spk_html = f'<div class="iq-tp-spk">&#128100; {_esc(spk)}</div>' if spk else ""
-            bar_inner = f'<div class="iq-tp-fill" style="width:{bar_pct}%;background:{bar_col}"></div>'
-            rows += (
-                f'<div class="iq-tp">'
-                f'<div class="iq-tp-rank">#{i}</div>'
-                f'<div class="iq-tp-bar"><div class="iq-tp-bg">{bar_inner}</div></div>'
-                f'<div class="iq-tp-score" style="color:{bar_col}">{score:+.3f}</div>'
-                f'<div class="iq-tp-body">{_esc(tp["text"])}{spk_html}</div>'
-                f'<div class="iq-tp-time">{time_str}</div>'
-                f'</div>'
-            )
-        st.markdown(
-            f'<div style="border:1px solid #D8DFE8;border-radius:5px;background:#FAFBFC;">{rows}</div>',
-            unsafe_allow_html=True,
-        )
+            meta = " · ".join(x for x in [time_str, spk] if x)
+            st.markdown(f"**#{i}** `{score:+.3f}` {tp["text"]}")
+            if meta:
+                st.caption(meta)
     else:
         st.caption("No talking points available.")
 
@@ -725,85 +610,55 @@ st.divider()
 # ================================================================
 # SECTION 3: SENTIMENT TRAJECTORY
 # ================================================================
-st.markdown('<div class="iq-lbl">Intra-call Sentiment Trajectory</div>', unsafe_allow_html=True)
+st.subheader("Intra-call Sentiment Trajectory")
 
 if not timeline_df.empty:
     fig = go.Figure()
-
-    # Q&A shading
     if is_full_call:
-        qa_min = timeline_df.loc[timeline_df["section"]=="Q&A","time_min"].min()
+        qa_min = timeline_df.loc[timeline_df["section"] == "Q&A", "time_min"].min()
         if pd.notna(qa_min):
+            _qa_method = "detected" if qa_start_time is not None else "65% heuristic"
             fig.add_vrect(x0=qa_min, x1=timeline_df["time_min"].max(),
-                          fillcolor="rgba(193,123,0,0.07)", line_width=0)
+                          fillcolor="rgba(255,165,0,0.08)", line_width=0)
             fig.add_annotation(x=qa_min, y=0.95, xref="x", yref="paper",
-                                text="Q&A Start", showarrow=True, arrowhead=2,
-                                arrowcolor="#C17B00", font=dict(size=10, color="#C17B00"),
-                                ax=30, ay=0)
-
+                                text=f"Q&A Start ({_qa_method})",
+                                showarrow=True, arrowhead=2, ax=30, ay=0)
     fig.add_trace(go.Scatter(
         x=timeline_df["time_min"], y=timeline_df["sentiment_score"],
-        name="FinBERT Sentiment", mode="lines",
-        line=dict(color="#1565C0", width=2),
+        name="FinBERT Sentiment", mode="lines", line=dict(width=2),
     ))
-
-    # Wav2Vec2 flat reference
     if "acoustic_confidence" in timeline_df.columns:
         proxy_val = timeline_df["acoustic_confidence"].iloc[0]
-        fig.add_hline(y=proxy_val, line_width=1.5, line_dash="dash", line_color="#C17B00",
+        fig.add_hline(y=proxy_val, line_width=1.5, line_dash="dash",
                       annotation_text=f"Wav2Vec2 ({proxy_val:+.2f})",
-                      annotation_position="top right", annotation_font_size=10,
-                      annotation_font_color="#C17B00")
-
-    fig.add_hline(y=0, line_width=1, line_dash="dot", line_color="#94A3B8")
-
-    _font = "Helvetica Neue, Helvetica, Arial, sans-serif"
-    fig.update_layout(
-        height=250, margin=dict(l=0, r=0, t=10, b=0),
-        xaxis_title="Call time (min)", yaxis_title="Sentiment",
-        yaxis_range=[-1, 1],
-        plot_bgcolor="#0F1923", paper_bgcolor="#0F1923",
-        font=dict(family=_font, size=11, color="#CBD5E0"),
-        legend=dict(orientation="h", y=1.1, font=dict(family=_font, size=11, color="#CBD5E0"),
-                    bgcolor="rgba(0,0,0,0)"),
-    )
-    fig.update_xaxes(showgrid=True, gridcolor="#1E2D3D", zeroline=False,
-                     tickfont=dict(family=_font, color="#7A90A8"),
-                     title_font=dict(family=_font, color="#7A90A8"))
-    fig.update_yaxes(showgrid=True, gridcolor="#1E2D3D", zeroline=False,
-                     tickfont=dict(family=_font, color="#7A90A8"),
-                     title_font=dict(family=_font, color="#7A90A8"))
+                      annotation_position="top right")
+    fig.add_hline(y=0, line_width=1, line_dash="dot")
+    fig.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=0),
+                      xaxis_title="Call time (min)", yaxis_title="Sentiment",
+                      yaxis_range=[-1, 1])
     st.plotly_chart(fig, use_container_width=True)
     if not is_full_call:
-        st.caption(f"Short clip ({call_duration_min:.0f} min) -- Q&A annotation requires >= 25 min.")
+        st.caption(f"Short clip ({call_duration_min:.0f} min) — Q&A annotation requires ≥ 25 min.")
 else:
     st.info("Sentiment trajectory requires audio mode with Whisper segments.")
 
 st.divider()
 
 # ================================================================
-# SECTION 4: SENTIMENT EXTREMES (with speaker labels)
+# SECTION 4: SENTIMENT EXTREMES
 # ================================================================
-st.markdown('<div class="iq-lbl">Sentiment Extremes</div>', unsafe_allow_html=True)
-ki1, ki2, ki3 = st.columns(3)
-
-def _ins_spk(segs, time_min, text=""):
-    sp = _speaker_for_time(segs, time_min, fallback_turns=av_turns, text=text)
-    return f'<span>&#128100; {_esc(sp)}</span>' if sp else ""
+st.subheader("Sentiment Extremes")
+ki1, ki2 = st.columns(2)
 
 with ki1:
     st.markdown("**Management Highlights**")
     if key_insights["highlights"]:
         for h in key_insights["highlights"]:
-            spk = _ins_spk(enriched_segments, h["time_min"], text=h["text"])
-            st.markdown(
-                f'<div class="iq-ins pos">'
-                f'<div><span class="iq-ins-score" style="color:#1A7F4B">{h["score"]:+.2f}</span></div>'
-                f'<div class="iq-ins-text">{_esc(h["text"])}</div>'
-                f'<div class="iq-ins-meta"><span>&#128337; {h["time_min"]} min</span>{spk}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            spk = h.get("speaker", "") or _speaker_for_time(
+                management_segments, h["time_min"], fallback_turns=av_turns, text=h["text"])
+            st.success(h["text"])
+            meta = " · ".join(x for x in [spk, f'{h["score"]:+.2f}', f'{h["time_min"]} min'] if x)
+            st.caption(meta)
     else:
         st.caption("None detected.")
 
@@ -811,219 +666,148 @@ with ki2:
     st.markdown("**Risk Signals**")
     if key_insights["risk_signals"]:
         for r in key_insights["risk_signals"]:
-            spk = _ins_spk(enriched_segments, r["time_min"], text=r["text"])
-            st.markdown(
-                f'<div class="iq-ins neg">'
-                f'<div><span class="iq-ins-score" style="color:#C0392B">{r["score"]:+.2f}</span></div>'
-                f'<div class="iq-ins-text">{_esc(r["text"])}</div>'
-                f'<div class="iq-ins-meta"><span>&#128337; {r["time_min"]} min</span>{spk}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-    else:
-        st.caption("None detected.")
-
-with ki3:
-    st.markdown("**Hedging Language**")
-    if key_insights["hedging_moments"]:
-        for h in key_insights["hedging_moments"]:
-            spk = _ins_spk(enriched_segments, h["time_min"], text=h["text"])
-            words_safe = _esc(", ".join(h["hedge_words"]))
-            st.markdown(
-                f'<div class="iq-ins hdg">'
-                f'<div><span class="iq-ins-score" style="color:#C17B00">{words_safe}</span></div>'
-                f'<div class="iq-ins-text">{_esc(h["text"])}</div>'
-                f'<div class="iq-ins-meta"><span>&#128337; {h["time_min"]} min</span>{spk}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+            spk = r.get("speaker", "") or _speaker_for_time(
+                management_segments, r["time_min"], fallback_turns=av_turns, text=r["text"])
+            st.error(r["text"])
+            meta = " · ".join(x for x in [spk, f'{r["score"]:+.2f}', f'{r["time_min"]} min'] if x)
+            st.caption(meta)
     else:
         st.caption("None detected.")
 
 st.divider()
 
 # ================================================================
-# SECTION 5: HISTORICAL TREND + DIVERGENCE (side by side)
+# SECTION 5: HISTORICAL TREND + DIVERGENCE
 # ================================================================
 hist_col, div_col2 = st.columns([1.6, 1])
 
 with hist_col:
-    st.markdown('<div class="iq-lbl">Historical Sentiment Trend -- up to 6 quarters</div>', unsafe_allow_html=True)
+    st.subheader("Historical Sentiment Trend")
     if len(qoq_data) > 1:
         qoq_df  = pd.DataFrame(list(reversed(qoq_data)))
         prior   = qoq_data[1]
         current = qoq_data[0]
         d_sent  = round(current["sentiment"] - prior["sentiment"], 3)
         d_hedge = round(current["hedge_freq"] - prior["hedge_freq"], 2)
-
         fig_t = go.Figure()
         fig_t.add_trace(go.Scatter(
             x=qoq_df["label"], y=qoq_df["sentiment"],
             mode="lines+markers", name="Net Sentiment",
-            line=dict(color="#4A9EE8", width=2), marker=dict(size=7, color="#4A9EE8"),
+            line=dict(width=2), marker=dict(size=7),
         ))
         fig_t.add_trace(go.Scatter(
             x=qoq_df["label"], y=qoq_df["hedge_freq"],
             mode="lines+markers", name="Hedging /100w",
-            line=dict(color="#E8A83A", width=1.5, dash="dash"), marker=dict(size=5),
+            line=dict(width=1.5, dash="dash"), marker=dict(size=5),
             yaxis="y2",
         ))
-        fig_t.add_hline(y=0, line_width=1, line_dash="dot", line_color="#2D4A6A")
-        _font = "Helvetica Neue, Helvetica, Arial, sans-serif"
+        fig_t.add_hline(y=0, line_width=1, line_dash="dot")
         fig_t.update_layout(
             height=230, margin=dict(l=0, r=40, t=10, b=0),
-            legend=dict(orientation="h", y=1.1,
-                        font=dict(family=_font, size=11, color="#CBD5E0"),
-                        bgcolor="rgba(0,0,0,0)"),
-            plot_bgcolor="#0F1923", paper_bgcolor="#0F1923",
-            font=dict(family=_font, size=11, color="#CBD5E0"),
-            yaxis=dict(title="Sentiment", range=[-1, 1], gridcolor="#1E2D3D",
-                       tickfont=dict(family=_font, color="#7A90A8"),
-                       title_font=dict(family=_font, color="#7A90A8")),
-            yaxis2=dict(title="Hedging", overlaying="y", side="right",
-                        showgrid=False,
-                        tickfont=dict(family=_font, color="#7A90A8"),
-                        title_font=dict(family=_font, color="#7A90A8")),
-            xaxis=dict(tickfont=dict(family=_font, color="#7A90A8")),
+            yaxis=dict(title="Sentiment", range=[-1, 1]),
+            yaxis2=dict(title="Hedging", overlaying="y", side="right", showgrid=False),
         )
         st.plotly_chart(fig_t, use_container_width=True)
-
         hc1, hc2 = st.columns(2)
-        hc1.metric("Sentiment vs prior Q", f"{current['sentiment']:+.3f}", f"{d_sent:+.3f}")
-        hc2.metric("Hedging vs prior Q", f"{current['hedge_freq']:+.2f}", f"{d_hedge:+.2f}")
+        hc1.metric("Sentiment vs prior Q", f'{current["sentiment"]:+.3f}', f'{d_sent:+.3f}')
+        hc2.metric("Hedging vs prior Q", f'{current["hedge_freq"]:+.2f}', f'{d_hedge:+.2f}')
     else:
-        st.info("Fetch prior quarters by running analysis -- transcripts cache locally.")
+        st.info("Fetch prior quarters by running analysis — transcripts cache locally.")
 
 with div_col2:
-    st.markdown('<div class="iq-lbl">Tone-Text Divergence -- Prepared vs Q&A</div>', unsafe_allow_html=True)
-    section_div = multimodal_result.get("section_divergence", [])
-    if section_div and is_full_call:
-        sd_df = pd.DataFrame(section_div)
-        fig_d = go.Figure()
-        fig_d.add_trace(go.Bar(name="FinBERT", x=sd_df["section"], y=sd_df["sentiment"],
-                               marker_color=["#4A9EE8","#E8A83A"], marker_line_width=0))
-        fig_d.add_trace(go.Bar(name="Wav2Vec2", x=sd_df["section"], y=sd_df["acoustic"],
-                               marker_color=["rgba(74,158,232,0.3)","rgba(232,168,58,0.3)"],
-                               marker_line_width=0))
-        fig_d.add_hline(y=0, line_width=1, line_dash="dot", line_color="#2D4A6A")
-        _font = "Helvetica Neue, Helvetica, Arial, sans-serif"
-        fig_d.update_layout(
-            barmode="group", height=230, margin=dict(l=0, r=0, t=10, b=0),
-            legend=dict(orientation="h", y=1.1,
-                        font=dict(family=_font, size=10, color="#CBD5E0"),
-                        bgcolor="rgba(0,0,0,0)"),
-            plot_bgcolor="#0F1923", paper_bgcolor="#0F1923",
-            font=dict(family=_font, size=11, color="#CBD5E0"),
-            yaxis=dict(title="Score", gridcolor="#1E2D3D",
-                       tickfont=dict(family=_font, color="#7A90A8"),
-                       title_font=dict(family=_font, color="#7A90A8")),
-            xaxis=dict(tickfont=dict(family=_font, color="#CBD5E0")),
-        )
-        fig_d.update_traces(marker_line_width=0)
-        st.plotly_chart(fig_d, use_container_width=True)
-        st.caption("Gap = divergence. Acoustic below FinBERT = scripted positivity.")
+    st.subheader("Tone-Text Divergence")
+    if transcript_only or not audio_features.get("wav2vec2_raw_norm"):
+        st.info("Audio required for tone-text divergence analysis.")
     else:
-        st.metric("Overall divergence", f"{insights['tone_text_divergence']:+.2f}",
-                  delta=insights["divergence_label"], delta_color="inverse")
-        st.caption("Section view requires audio + full call (>= 25 min).")
+        section_div = multimodal_result.get("section_divergence", [])
+        if section_div and is_full_call:
+            sd_df = pd.DataFrame(section_div)
+            fig_d = go.Figure()
+            fig_d.add_trace(go.Bar(name="FinBERT", x=sd_df["section"], y=sd_df["sentiment"],
+                                   marker_line_width=0))
+            fig_d.add_trace(go.Bar(name="Wav2Vec2", x=sd_df["section"], y=sd_df["acoustic"],
+                                   marker_line_width=0))
+            fig_d.add_hline(y=0, line_width=1, line_dash="dot")
+            fig_d.update_layout(barmode="group", height=230, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig_d, use_container_width=True)
+            st.caption("Gap = divergence. Acoustic below FinBERT = scripted positivity.")
+        else:
+            st.info("Section view requires full call audio (≥ 25 min).")
 
 st.divider()
 
 # ================================================================
 # SECTION 6: SPEAKER ATTRIBUTION
 # ================================================================
-spk_data = [s for s in insights["speaker_breakdown"] if s.get("speaker", "UNKNOWN") not in ("UNKNOWN", "")]
-if spk_data and is_full_call:
-    st.markdown('<div class="iq-lbl">Speaker Attribution</div>', unsafe_allow_html=True)
+st.subheader("Speaker Attribution — Management MCI")
+
+# Keep named management speakers; drop confirmed analysts/operators and
+# unresolved pyannote labels (SPEAKER_XX / UNKNOWN).
+spk_data = [
+    s for s in insights["speaker_breakdown"]
+    if s.get("speaker", "UNKNOWN") not in ("UNKNOWN", "")
+    and not s.get("speaker", "").lower().startswith("speaker_")
+    and is_management_speaker(s.get("speaker", "")) is not False
+]
+
+if not enriched_segments:
+    st.info("Speaker attribution requires audio mode with Whisper transcription.")
+elif not spk_data:
+    st.info(
+        "No named management speakers resolved. "
+        "This occurs when pyannote diarization is unavailable or the Alpha Vantage "
+        "transcript title regex did not match speaker introductions."
+    )
+else:
     sp_df = pd.DataFrame(spk_data)
+
+    # Chart: MCI by speaker, split by section
     fig_sp = go.Figure()
-    for sec, col in [("Prepared","#4A9EE8"),("Q&A","#E8A83A")]:
-        sub = sp_df[sp_df["section"]==sec]
+    for sec in ["Prepared", "Q&A"]:
+        sub = sp_df[sp_df["section"] == sec]
         if not sub.empty:
             fig_sp.add_trace(go.Bar(
-                name=sec, x=sub["mci"], y=sub["speaker"],
-                orientation="h", marker_color=col, marker_line_width=0,
+                name=sec,
+                x=sub["mci"],
+                y=sub["speaker"],
+                orientation="h",
+                marker_line_width=0,
+                text=[f"{v:.0f}" for v in sub["mci"]],
+                textposition="outside",
             ))
     fig_sp.update_layout(
-        barmode="group", height=max(160, len(sp_df)*30), margin=dict(l=0,r=0,t=10,b=0),
-        legend=dict(orientation="h", y=1.1, font_size=11,
-                    font_color="#CBD5E0", bgcolor="rgba(0,0,0,0)"),
-        plot_bgcolor="#0F1923", paper_bgcolor="#0F1923",
-        font=dict(family="Inter", size=11, color="#CBD5E0"),
-        xaxis=dict(title="MCI", range=[0,100], gridcolor="#1E2D3D",
-                   tickfont=dict(color="#7A90A8")),
-        yaxis=dict(tickfont=dict(color="#CBD5E0")),
+        barmode="group",
+        height=max(180, len(sp_df) * 35),
+        margin=dict(l=0, r=40, t=10, b=0),
+        xaxis=dict(title="MCI [0–100]", range=[0, 110]),
+        legend=dict(orientation="h", y=1.08),
     )
     st.plotly_chart(fig_sp, use_container_width=True)
-    st.divider()
+    st.caption("MCI = word-count-weighted FinBERT sentiment + audio features · Analysts and operators excluded")
+
+st.divider()
 
 # ================================================================
-# SECTION 7: PEER COMPARISON (KPI card grid)
+# SECTION 7: PEER COMPARISON
 # ================================================================
 peer_sector = insights.get("peer_sector", "Peer Group")
-st.markdown(f'<div class="iq-lbl">Peer Comparison -- {_esc(peer_sector)}</div>', unsafe_allow_html=True)
-st.caption("&#9679; Live values for selected ticker.")
+st.subheader(f"Peer Comparison — {peer_sector}")
 
 peer_df = insights.get("peer_data", pd.DataFrame())
 if not peer_df.empty and "is_selected" in peer_df.columns:
-    sig_classes = {"Live": "sig-live", "Positive": "sig-positive",
-                   "Neutral": "sig-neutral", "Watch": "sig-watch"}
-
-    def _pc(val, metric):
-        """Return colour for a peer table cell value."""
-        if metric == "mci":
-            return "#1A7F4B" if val >= 75 else "#C17B00" if val >= 55 else "#C0392B"
-        if metric == "nsi":
-            return "#C0392B" if val > 1.0 else "#C17B00" if val > 0.5 else \
-                   "#1A7F4B" if val < -0.5 else "#8A9BB0"
-        if metric == "qa":
-            return "#C0392B" if val > 0.20 else "#C17B00" if val > 0.10 else "#1A7F4B"
-        if metric == "div":
-            return "#C0392B" if val < -0.05 else "#1A7F4B" if val > 0.05 else "#8A9BB0"
-        return "#8A9BB0"
-
-    thead = (
-        '<thead><tr>'
-        '<th></th><th>Ticker</th>'
-        '<th>MCI</th><th>NSI &sigma;</th><th>Q&amp;A Stress</th>'
-        '<th>Divergence</th><th>Signal</th>'
-        '</tr></thead>'
+    display_df = peer_df[["rank", "ticker", "mci", "qa_stress", "signal", "is_selected"]].copy()
+    display_df["ticker"] = display_df.apply(
+        lambda r: f"● {r["ticker"]}" if r["is_selected"] else r["ticker"], axis=1
     )
-    tbody = "<tbody>"
-    for _, row in peer_df.iterrows():
-        is_sel   = row["is_selected"]
-        tr_cls   = "sel-row" if is_sel else ""
-        rank     = int(row.get("rank", 0))
-        tk       = _esc(row["ticker"])
-        live_dot = '<span class="pt-live">&#9679;</span>' if is_sel else ""
-        mc       = row["mci"]
-        nsi_v    = row.get("nsi_sigma", 0.0)
-        qa_v     = row.get("qa_stress", 0.10)
-        div_v    = row.get("divergence", 0.0)
-        sig      = row.get("signal", "")
-        scls     = sig_classes.get(sig, "sig-neutral")
-        mci_c    = "#4A9EE8" if is_sel else _pc(mc, "mci")
-        tbody += (
-            f'<tr class="{tr_cls}">'
-            f'<td class="pt-rank">#{rank}</td>'
-            f'<td class="pt-tk">{live_dot}{tk}</td>'
-            f'<td style="color:{mci_c};font-weight:600">{mc}</td>'
-            f'<td style="color:{_pc(nsi_v,"nsi")}">{nsi_v:+.2f}</td>'
-            f'<td style="color:{_pc(qa_v,"qa")}">{qa_v:.2f}</td>'
-            f'<td style="color:{_pc(div_v,"div")}">{div_v:+.2f}</td>'
-            f'<td><span class="iq-peer-sig {scls}">{_esc(sig)}</span></td>'
-            f'</tr>'
-        )
-    tbody += "</tbody>"
-    st.markdown(
-        f'<div style="overflow-x:auto;border:1px solid #1E3A5F;border-radius:5px;">'
-        f'<table class="iq-peer-tbl">{thead}{tbody}</table></div>',
-        unsafe_allow_html=True,
-    )
+    display_df = display_df.rename(columns={
+        "rank": "#", "ticker": "Ticker", "mci": "MCI",
+        "qa_stress": "Q&A Stress", "signal": "Signal",
+    }).drop(columns=["is_selected"])
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
     st.caption(
-        "MCI = FinBERT text sentiment [0–100] for all peers (fair basis). "
-        "NSI sigma = narrative shift vs 6Q avg (>1.0 = materially cautious). "
-        "Q&A Stress = sentiment decay in analyst questioning phase. Div = tone-text divergence."
+        "MCI = FinBERT text sentiment [0–100] · "
+        "Q&A Stress = sentiment decay in analyst Q&A · "
+        "N/A = transcript not yet cached · ● = selected ticker"
     )
 else:
     st.info("Peer data unavailable.")
@@ -1031,12 +815,10 @@ else:
 st.divider()
 
 # ================================================================
-# SECTION 8: EVENT STUDY — EARNINGS SENSITIVITY ANALYSIS
+# SECTION 8: EVENT STUDY
 # ================================================================
-st.markdown('<div class="iq-lbl">Event-Study Analysis &mdash; Earnings Sensitivity</div>', unsafe_allow_html=True)
-st.caption(
-    f"CAPM event study: estimation window t\u221290 to t\u221220 \u2022 event window t\u22121 to t+3 \u2022 market proxy: SPY"
-)
+st.subheader("Event-Study Analysis — Earnings Sensitivity")
+st.caption("CAPM event study: estimation window t−90 to t−20 · event window t−1 to t+3 · market proxy: SPY")
 
 _es_col, _sec_col = st.columns([1.1, 1])
 
@@ -1044,154 +826,223 @@ with _es_col:
     if "error" in es_result:
         st.warning(f"Event study unavailable: {es_result['error']}")
     else:
-        _beta    = es_result["beta"]
-        _car     = es_result["car"]
-        _tstat   = es_result["t_stat"]
-        _rsq     = es_result["r_squared"]
-        _n_est   = es_result["n_est"]
-        _edate   = es_result["event_date"]
-        _ar_df   = es_result["ar_series"]
-        _sig     = abs(_tstat) >= 1.96
-        _sens_lbl = "High" if _beta > 0.7 else "Medium" if _beta > 0.3 else "Low"
-        _beta_col = "#C0392B" if _beta > 0.7 else "#C17B00" if _beta > 0.3 else "#1A7F4B"
-        _car_col  = "#1A7F4B" if _car >= 0 else "#C0392B"
-        _sig_str  = "Significant (95%)" if _sig else "Not significant"
-        _sig_col  = "#1A7F4B" if _sig else "#7A90A8"
+        _beta  = es_result["beta"]
+        _car   = es_result["car"]
+        _tstat = es_result["t_stat"]
+        _rsq   = es_result["r_squared"]
+        _n_est = es_result["n_est"]
+        _edate = es_result["event_date"]
+        _ar_df = es_result["ar_series"]
+        _sig   = abs(_tstat) >= 1.96
 
-        # KPI cards
         _ek1, _ek2, _ek3, _ek4 = st.columns(4)
-        _ek1.markdown(f"""<div class="iq-kpi ok">
-          <div class="iq-kpi-lbl">Beta (&beta;)</div>
-          <div class="iq-kpi-val" style="color:{_beta_col}">{_beta:.2f}</div>
-          <div class="iq-kpi-sub">{_sens_lbl} sensitivity</div>
-        </div>""", unsafe_allow_html=True)
-        _ek2.markdown(f"""<div class="iq-kpi {'ok' if _car>=0 else 'alert'}">
-          <div class="iq-kpi-lbl">CAR [-1,+3]</div>
-          <div class="iq-kpi-val" style="color:{_car_col}">{_car:+.2%}</div>
-          <div class="iq-kpi-sub">Cumul. abnormal ret.</div>
-        </div>""", unsafe_allow_html=True)
-        _ek3.markdown(f"""<div class="iq-kpi ok">
-          <div class="iq-kpi-lbl">T-Statistic</div>
-          <div class="iq-kpi-val" style="color:{_sig_col}">{_tstat:+.2f}</div>
-          <div class="iq-kpi-sub">{_sig_str}</div>
-        </div>""", unsafe_allow_html=True)
-        _ek4.markdown(f"""<div class="iq-kpi ok">
-          <div class="iq-kpi-lbl">Model R&sup2;</div>
-          <div class="iq-kpi-val" style="color:#CBD5E0">{_rsq:.2f}</div>
-          <div class="iq-kpi-sub">{_n_est} est. days &bull; t=0: {_edate}</div>
-        </div>""", unsafe_allow_html=True)
+        _sens = "High" if _beta > 0.7 else "Medium" if _beta > 0.3 else "Low"
+        _ek1.metric("Market Beta (β)", f"{_beta:.2f}", help=f"General market sensitivity vs SPY · {_sens} · from estimation window")
+        _ek2.metric("CAR [−1,+3]", f"{_car:+.2%}", help="Cumulative abnormal return")
+        _ek3.metric("T-Statistic", f"{_tstat:+.2f}",
+                    help="Significant (95%)" if _sig else "Not significant")
+        _ek4.metric("Model R²", f"{_rsq:.2f}",
+                    help=f"{_n_est} est. days · t=0: {_edate}")
 
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # AR bar chart + CAR line
-        _font = "Helvetica Neue, Helvetica, Arial, sans-serif"
         fig_es = go.Figure()
-
-        _bar_colours = ["#1A7F4B" if v >= 0 else "#C0392B" for v in _ar_df["ar"]]
+        _bar_colours = ["green" if v >= 0 else "red" for v in _ar_df["ar"]]
         fig_es.add_trace(go.Bar(
-            x=_ar_df["label"],
-            y=_ar_df["ar"],
-            name="Abnormal Return",
-            marker_color=_bar_colours,
-            marker_line_width=0,
-            yaxis="y1",
+            x=_ar_df["label"], y=_ar_df["ar"],
+            name="Abnormal Return", marker_color=_bar_colours, marker_line_width=0,
         ))
         fig_es.add_trace(go.Scatter(
-            x=_ar_df["label"],
-            y=_ar_df["car_cumulative"],
-            name="Cumulative AR",
-            mode="lines+markers",
-            line=dict(color="#4A9EE8", width=2),
-            marker=dict(size=7, color="#4A9EE8"),
-            yaxis="y1",
+            x=_ar_df["label"], y=_ar_df["car_cumulative"],
+            name="Cumulative AR", mode="lines+markers",
+            line=dict(width=2), marker=dict(size=7),
         ))
-
-        # Vertical line at t=0
-        _t0_label = f"t=0"
-        if _t0_label in _ar_df["label"].values:
-            fig_es.add_vline(
-                x=list(_ar_df["label"]).index(_t0_label),
-                line_dash="dot",
-                line_color="#7A90A8",
-                annotation_text="Event (t=0)",
-                annotation_font_color="#7A90A8",
-                annotation_font_size=10,
-            )
-
+        if "t=0" in list(_ar_df["label"].values):
+            fig_es.add_vline(x=list(_ar_df["label"]).index("t=0"),
+                             line_dash="dot", annotation_text="Event (t=0)")
         fig_es.update_layout(
-            height=260,
-            margin=dict(l=0, r=0, t=10, b=0),
-            plot_bgcolor="#0F1923",
-            paper_bgcolor="#0F1923",
-            font=dict(family=_font, size=11, color="#CBD5E0"),
-            legend=dict(orientation="h", y=1.08, font=dict(family=_font, size=10, color="#CBD5E0"), bgcolor="rgba(0,0,0,0)"),
-            yaxis=dict(
-                title="Return", gridcolor="#1E2D3D", zeroline=True, zerolinecolor="#2A4060",
-                tickformat=".1%", tickfont=dict(family=_font, color="#7A90A8"),
-                title_font=dict(family=_font, color="#7A90A8"),
-            ),
-            xaxis=dict(tickfont=dict(family=_font, color="#7A90A8")),
-            barmode="overlay",
+            height=260, margin=dict(l=0, r=0, t=10, b=0),
+            yaxis=dict(tickformat=".1%", zeroline=True),
         )
         st.plotly_chart(fig_es, use_container_width=True)
         st.caption(
-            f"Bars = daily abnormal return (actual \u2212 CAPM expected). "
-            f"Blue line = cumulative CAR. &beta; = {_beta:.3f} from {_n_est}-day estimation window."
+            f"Bars = daily AR (actual − CAPM expected). "
+            f"Line = cumulative CAR. β = {_beta:.3f} from {_n_est}-day estimation window."
         )
 
 with _sec_col:
-    st.markdown('<div style="color:#7A90A8;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Sector Sensitivity Index (\u03b2)</div>', unsafe_allow_html=True)
+    st.subheader("Earnings Price Sensitivity — Avg |CAR[−1,+3]|")
+    _live_car          = es_result.get("car") if "error" not in es_result else None
+    _peer_sector_label = insights.get("peer_sector")
+    _eps_data          = compute_sector_earnings_sensitivity()
+    _sec_df            = get_sector_sensitivity_df(_eps_data, _peer_sector_label, _live_car)
 
-    _live_beta  = es_result.get("beta") if "error" not in es_result else None
-    _peer_sector_label = insights.get("peer_sector", None)
-    _sec_df = get_sector_sensitivity_df(_peer_sector_label, _live_beta)
-
-    _bar_cols = [
-        "#4A9EE8" if row["is_live"] else row["colour"]
-        for _, row in _sec_df.iterrows()
-    ]
-    _font = "Helvetica Neue, Helvetica, Arial, sans-serif"
     fig_sec = go.Figure()
     fig_sec.add_trace(go.Bar(
-        x=_sec_df["beta"],
-        y=_sec_df["sector"],
-        orientation="h",
-        marker_color=_bar_cols,
-        marker_line_width=0,
-        text=[f"{b:.2f}" for b in _sec_df["beta"]],
-        textposition="outside",
-        textfont=dict(family=_font, size=10, color="#CBD5E0"),
-        hovertemplate="<b>%{y}</b><br>β = %{x:.3f}<extra></extra>",
+        x=_sec_df["eps"], y=_sec_df["sector"], orientation="h",
+        marker_color=_sec_df["colour"].tolist(), marker_line_width=0,
+        text=[f"{v*100:.1f}%" for v in _sec_df["eps"]], textposition="outside",
+        hovertemplate="<b>%{y}</b><br>Avg |CAR| = %{x:.1%}<extra></extra>",
     ))
-
-    # Sensitivity threshold lines
-    for _thresh, _lbl in [(0.3, "Low | Med"), (0.7, "Med | High")]:
-        fig_sec.add_vline(
-            x=_thresh,
-            line_dash="dot",
-            line_color="#2A4060",
-            annotation_text=_lbl,
-            annotation_font_color="#7A90A8",
-            annotation_font_size=9,
-            annotation_position="top",
-        )
-
+    for _thresh, _lbl in [(0.03, "Low | Med"), (0.06, "Med | High")]:
+        fig_sec.add_vline(x=_thresh, line_dash="dot",
+                          annotation_text=_lbl, annotation_font_size=9)
     fig_sec.update_layout(
-        height=520,
-        margin=dict(l=0, r=40, t=10, b=0),
-        plot_bgcolor="#0F1923",
-        paper_bgcolor="#0F1923",
-        font=dict(family=_font, size=10, color="#CBD5E0"),
-        showlegend=False,
-        xaxis=dict(
-            title="Beta (β)", range=[0, max(_sec_df["beta"]) * 1.25],
-            gridcolor="#1E2D3D", tickfont=dict(family=_font, color="#7A90A8"),
-            title_font=dict(family=_font, color="#7A90A8"),
-        ),
-        yaxis=dict(tickfont=dict(family=_font, color="#CBD5E0")),
+        height=520, margin=dict(l=0, r=40, t=10, b=0), showlegend=False,
+        xaxis=dict(title="Avg |CAR| — event window [−1, +3]",
+                   range=[0, max(_sec_df["eps"]) * 1.25], tickformat=".0%"),
     )
     st.plotly_chart(fig_sec, use_container_width=True)
+    _eps_source = "Live computed" if _eps_data else "Reference fallback"
     st.caption(
-        "\U0001f7e2 Low (<0.3) \u2003\U0001f7e1 Medium (0.3\u20130.7) \u2003\U0001f534 High (>0.7) \u2003"
-        "\U0001f535 Selected sector (live \u03b2)"
+        f"🟢 Low (<3%) · 🟡 Medium (3–6%) · "
+        f"🔴 High (>6%) · 🔵 Selected sector (live |CAR|) · Source: {_eps_source}"
     )
+
+st.divider()
+
+# ================================================================
+# SECTION 9: METHODOLOGY
+# ================================================================
+st.subheader("How EarningsIQ Analyses Calls")
+
+with st.expander("Data sources & ingestion", expanded=False):
+    st.markdown("""
+**Audio** files are sourced from [EarningsCallBiz](https://www.earningscall.biz) and
+placed in the `cache/` directory. The pipeline reads them directly from there —
+no re-download occurs on repeat runs. If no cached file is found for a ticker/quarter,
+yt-dlp attempts a YouTube fallback; if that also fails (common on cloud hosts),
+the pipeline degrades gracefully to transcript-only mode.
+
+**Transcripts** come from Alpha Vantage's earnings call API. They are used for:
+- Speaker name resolution (mapping pyannote's SPEAKER_00/01 labels to real names and titles)
+- Peer comparison (computing MCI for competitor firms without processing audio)
+- Historical QoQ sentiment (fetching the previous 6 quarters to compute the Narrative Shift Index)
+
+If no transcript is available, speaker names fall back to pyannote's generic SPEAKER_XX labels.
+Charts requiring audio (trajectory, divergence, speaker attribution) show an info message
+when operating in transcript-only mode.
+""")
+
+with st.expander("Transcript analysis — how sentiment is measured", expanded=False):
+    st.markdown("""
+**Model**: [FinBERT](https://huggingface.co/ProsusAI/finbert) — a BERT model fine-tuned on
+financial text (earnings call transcripts, SEC filings, financial news). It outperforms
+general-purpose sentiment models on earnings call language because it understands
+domain-specific phrases like "headwinds", "beat consensus", and "margin expansion".
+
+**Segment-level scoring**: Whisper splits the audio into natural speech segments
+(typically 5–20 seconds each). FinBERT scores each segment independently, producing
+a time-stamped sentiment trajectory rather than a single bulk score. This powers the
+intra-call timeline chart.
+
+**Word-count weighting**: When aggregating across segments, each segment is weighted
+by its word count. Filler phrases ("Thank you", "That's a great question") carry
+proportionally less weight than 100-word explanations of operating leverage.
+Segments under 8 words are excluded from aggregates entirely.
+
+**Multi-sample for history**: When analysing previous quarters for QoQ comparison,
+5 evenly-spaced 1,500-character windows are sampled across the transcript, skipping
+the first 10% (safe harbour boilerplate). Their scores are averaged for a fair
+cross-quarter comparison.
+
+**Sentiment score**: `positive_probability − negative_probability`, range [−1, +1].
+Zero = neutral; +1 = maximally positive; −1 = maximally negative.
+Typical earnings calls land between +0.1 and +0.5.
+""")
+
+with st.expander("Audio analysis — Wav2Vec2 and acoustic features", expanded=False):
+    st.markdown("""
+**Transcription**: [OpenAI Whisper](https://github.com/openai/whisper) (base model)
+converts the audio to text with timestamps. It runs locally on CPU (or Apple MPS).
+Results are cached after the first run.
+
+**Speaker diarization**: [pyannote](https://github.com/pyannote/pyannote-audio) 3.1
+assigns a speaker label (SPEAKER_00, SPEAKER_01, …) to each audio segment. Labels are
+then resolved to real names using word-overlap matching against the Alpha Vantage
+transcript. Analysts and IR representatives are filtered out; only named management
+speakers (CEO, CFO, COO, etc.) contribute to MCI and sentiment scores.
+
+**Acoustic features** (librosa):
+- *Pitch mean & std* — sampled across start, middle, and end of the call. High pitch
+  coefficient of variation indicates vocal instability.
+- *Pause ratio* — frames where RMS energy drops below 20% of the call mean.
+  Compressed audio from YouTube raises the noise floor, so 20% is used rather than 10%.
+- *Tempo* — speaking rate in BPM.
+
+**Wav2Vec2** ([facebook/wav2vec2-base-960h](https://huggingface.co/facebook/wav2vec2-base-960h)):
+A transformer trained on 960 hours of LibriSpeech speech. Three windows are sampled
+(start, middle, end) to cover the full call without exceeding memory limits.
+The confidence proxy is derived from the **temporal coefficient of variation** of
+per-timestep embedding norms — more dynamic, engaged speech produces higher variation
+than monotone scripted delivery. This is codec-independent (unlike the raw norm).
+""")
+
+with st.expander("How MCI is calculated", expanded=False):
+    st.markdown("""
+**Management Confidence Index (MCI)** is a composite score from 0 to 100.
+
+| Component | Weight | Source | Interpretation |
+|-----------|--------|---------|----------------|
+| FinBERT net sentiment | 40% | Text | What management *says* |
+| Wav2Vec2 confidence proxy | 35% | Audio | How management *sounds* |
+| Inverse pause ratio | 15% | Audio | Hesitation / fluency |
+| Inverse pitch CV | 10% | Audio | Vocal steadiness |
+
+Weights follow Chen et al. (2023): audio adds incremental value beyond text
+but text remains the primary signal for earnings calls.
+
+**Formula**: `MCI = (sentiment_norm × 0.40 + wav2vec2 × 0.35 + pause_inv × 0.15 + pitch_inv × 0.10) × 100`
+
+where `sentiment_norm = (FinBERT_score + 1) / 2` maps [−1, +1] → [0, 1].
+
+**Tone-text divergence** = `(Wav2Vec2 − FinBERT_norm) × 0.5`
+
+Negative divergence means acoustic confidence is below textual sentiment — a pattern
+associated with scripted positivity masking genuine hesitation (Hajek & Munk, 2023).
+Flag threshold: −0.12.
+""")
+
+with st.expander("Narrative Shift Index (NSI) and Q&A Stress", expanded=False):
+    st.markdown("""
+**NSI** measures how far the current call's language has shifted from the firm's
+own historical baseline across the prior 6 quarters.
+
+`NSI σ = (current_sentiment − historical_mean) / historical_std`
+
+A floor of 0.05 is applied to `historical_std` to prevent absurd sigma values when
+prior quarters had very similar transcripts (near-zero variance). Typical range: ±3σ.
+Interpretation: +2σ = unusually bullish vs history; −2σ = unusually cautious.
+
+**Q&A Stress** = prepared remarks sentiment − Q&A sentiment (word-count weighted).
+
+The Q&A section start is detected by scanning Whisper segments for operator
+transition phrases ("your first question", "we'll now open the floor", etc.).
+Falls back to the 65% duration heuristic only when no phrase is found.
+Price et al. (2012) show the Q&A section has the highest alpha among call sections
+because it is unscripted and analysts ask pointed questions.
+
+Threshold: >0.20 = high stress; >0.10 = moderate.
+""")
+
+with st.expander("Event study — Cumulative Abnormal Return (CAR)", expanded=False):
+    st.markdown("""
+Methodology: CAPM event study following Brown & Warner (1985).
+
+**Estimation window**: t = −120 to t = −20 trading days before the earnings date.
+OLS regression of stock returns on SPY returns estimates the stock's normal return
+behaviour: `R_stock = α + β × R_SPY`.
+
+**Event window**: t = −1 to t = +3 trading days.
+Abnormal return on each day: `AR_t = R_actual_t − (α + β × R_SPY_t)`.
+Cumulative abnormal return: `CAR = Σ AR_t`.
+
+**T-statistic**: `CAR / (σ_est × √n_event)` where σ_est is the residual standard
+deviation from the estimation window. Significant at 95% if |t| ≥ 1.96.
+
+**Market Beta (β)** shown in the metrics is the general CAPM beta from the estimation
+window — it measures normal day-to-day market sensitivity, not earnings-specific
+sensitivity. The earnings-specific measure is **CAR [−1,+3]**.
+
+**Earnings Price Sensitivity** chart shows the average |CAR[−1,+3]| across the last
+3 earnings events for 3 representative tickers per sector, computed live from
+yfinance price data using calendar-approximate earnings dates.
+""")
