@@ -1,11 +1,21 @@
 """
-Streamlit app -- main entry point.
+Streamlit app for multimodal earnings analysis.
+This is the main entry point for the app and 
+builds the dashboard that the user will see.
 
-Multimodal sources:
-  Audio mode  -> Whisper transcription -> per-segment FinBERT sentiment
-                                       -> librosa acoustics + Wav2Vec2 confidence proxy
-  Transcript  -> Alpha Vantage (cached locally) -> talking points, QoQ comparison
-  Toggle      -> 'Transcript only' sidebar switch bypasses audio for fast UI testing
+This file connects all parts of the system together and runs the full pipeline:
+1. Fetch earnings call data 
+    - Cache or yt dlp for audio files
+    - Alpha Vantage for backup transcripts or transcript only mode
+2. Process audio/transcript 
+    - Whisper for transcription
+    - pyannote for speaker diarization
+3. Analyse sentiment and tone 
+    - FinBERT for sentiment
+    - Wav2Vec2 for confidence proxy
+    - Librosa for acoustics
+4. Generate insights & Multimodal Analysis
+5. Display results in the dashboard (Streamlit)
 """
 
 import streamlit as st
@@ -29,86 +39,9 @@ from nlp import (
 from audio import extract_audio_features, _wav2vec2_available
 from multimodal import analyse_multimodal
 from insights import generate_insights, get_peer_tickers, SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
+from utils import _analyse_peer, get_previous_quarters, _esc, _speaker_from_turns, sentiment_colour, _speaker_for_time, _key_takeaways
 
 st.set_page_config(page_title="EarningsIQ", layout="wide")
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _analyse_peer(peer_ticker, period, year):
-    """
-    Fetch and analyse a peer ticker's transcript for the given quarter.
-    Returns dict with mci, qa_stress, signal — or None on failure.
-    Cached 24h so repeat runs use local cache, not API credits.
-    """
-    try:
-        text, err = fetch_transcript_cached(peer_ticker, period, year)
-        if not text:
-            return None
-        stats    = analyse_transcript_text(text)
-        text_mci = round(((stats["sentiment"] + 1) / 2) * 100, 1)
-        qa_stress = compute_text_qa_stress(text)
-        signal   = "Positive" if text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if text_mci <= SIGNAL_MCI_WATCH else "Neutral"
-        return {"mci": text_mci, "qa_stress": qa_stress, "signal": signal}
-    except Exception:
-        return None
-
-
-@st.cache_data
-def is_valid_ticker(ticker):
-    """Quick yfinance check to catch typos before running the pipeline."""
-    try:
-        return yf.Ticker(ticker).fast_info["lastPrice"] is not None
-    except Exception:
-        return False
-
-
-def get_previous_quarters(period, year, n=2):
-    """Return list of (period, year) for the n quarters before the given one."""
-    quarters = ["Q1", "Q2", "Q3", "Q4"]
-    idx = quarters.index(period)
-    result = []
-    cur_idx, cur_year = idx, year
-    for _ in range(n):
-        cur_idx -= 1
-        if cur_idx < 0:
-            cur_idx = 3
-            cur_year -= 1
-        result.append((quarters[cur_idx], cur_year))
-    return result
-
-
-def _esc(text):
-    """HTML-escape text before injecting into HTML blocks."""
-    return _html_lib.escape(str(text)) if text else ""
-
-
-def _speaker_from_turns(av_turns, text):
-    """Match text to best AV transcript speaker via normalised word overlap."""
-    if not av_turns or not text:
-        return ""
-    import re as _re2
-    def _nw(t):
-        return set(_re2.sub(r"[^a-z0-9\s]", "", t.lower()).split())
-    words = _nw(text)
-    if len(words) < 2:
-        return ""
-    best_name, best_score = "", 0
-    for turn in av_turns:
-        overlap = len(words & _nw(turn["text"]))
-        if overlap > best_score:
-            best_score = overlap
-            best_name = turn["name"]
-    return best_name if best_score >= 2 else ""
-
-
-def sentiment_colour(score):
-    """Return a hex colour on a red-to-green gradient for a sentiment score in [-1, +1]."""
-    t = (score + 1) / 2          # map [-1,+1] -> [0,1]
-    t = max(0.0, min(1.0, t))
-    r = int(220 * (1 - t))
-    g = int(180 * t)
-    return f"#{r:02x}{g:02x}50"  # muted red -> muted green
-
 
 # ============================================================
 # SIDEBAR
@@ -121,7 +54,7 @@ with st.sidebar:
     ticker = st.text_input("Ticker", "AAPL").upper()
     col_p, col_y = st.columns(2)
     period = col_p.selectbox("Quarter", ["Q1", "Q2", "Q3", "Q4"])
-    year   = col_y.selectbox("Year", list(range(2026, 2017, -1)), index=2)
+    year = st.slider("Year", 2011, 2026, 2018)
 
     transcript_only = st.toggle(
         "Transcript-only mode",
@@ -161,12 +94,6 @@ if not run:
     st.info("Select a ticker and quarter in the sidebar, then click **Analyse Call**.")
     st.stop()
 
-# Auto-clear cache when the selected call changes -- ensures pyannote/Whisper reruns on new input
-_call_key = f"{ticker}_{period}_{year}"
-if st.session_state.get("last_call_key") != _call_key:
-    st.cache_data.clear()
-    st.session_state["last_call_key"] = _call_key
-
 if not is_valid_ticker(ticker):
     st.error(f"'{ticker}' is not a recognised ticker.")
     st.stop()
@@ -186,7 +113,7 @@ title_map         = {}
 
 if transcript_only:
     # --- Transcript-only mode: skip all audio processing ---
-    status.text("Fetching Alpha Vantage transcript (cached locally if available)...")
+    status.text("Fetching Alpha Vantage transcript")
     transcript_text, err = fetch_transcript_cached(ticker, period, year)
     if not transcript_text:
         st.error(f"Could not load transcript: {err}")
