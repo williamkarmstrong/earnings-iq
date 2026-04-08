@@ -10,7 +10,6 @@ import spacy
 import numpy as np
 import streamlit as st
 
-
 @st.cache_resource(show_spinner="Loading FinBERT sentiment model…")
 def _load_finbert():
     """Load FinBERT once per server session via st.cache_resource."""
@@ -359,6 +358,10 @@ _QA_TRANSITION_PHRASES = [
     "start the q&a",
     "open the q&a",
     "ready for questions",
+    "first question comes from",
+    "first question is from",
+    "next question comes from",
+    "our first question",
 ]
 
 

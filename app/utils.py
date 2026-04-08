@@ -2,6 +2,9 @@ import streamlit as st
 import yfinance as yf
 import html as _html_lib
 import re
+from ingestion import fetch_transcript_cached, fetch_backup_transcript
+from nlp import analyse_transcript_text, compute_text_qa_stress
+from insights import SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _analyse_peer(peer_ticker, period, year):

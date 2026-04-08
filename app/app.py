@@ -34,12 +34,12 @@ from nlp import (
     split_prepared_vs_qa, get_top_keywords, extract_key_insights,
     extract_talking_points, analyse_transcript_text, compute_nsi,
     parse_av_speakers, _finbert_available, compute_text_qa_stress,
-    weighted_segment_mean, find_qa_start_time,
+    weighted_segment_mean, find_qa_start_time
 )
 from audio import extract_audio_features, _wav2vec2_available
 from multimodal import analyse_multimodal
 from insights import generate_insights, get_peer_tickers, SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
-from utils import _analyse_peer, get_previous_quarters, _esc, _speaker_from_turns, sentiment_colour, _speaker_for_time, _key_takeaways
+from utils import _analyse_peer, get_previous_quarters, _esc, _speaker_from_turns, sentiment_colour, _speaker_for_time, _key_takeaways, is_valid_ticker
 
 st.set_page_config(page_title="EarningsIQ", layout="wide")
 
