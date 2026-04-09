@@ -520,13 +520,13 @@ with tp_col:
         sorted_tp = sorted(talking_points, key=lambda x: x["sentiment"], reverse=True)
         for i, tp in enumerate(sorted_tp, 1):
             score    = tp["sentiment"]
-            time_str = f"{tp["time_min"]} min" if tp.get("time_min") is not None else ""
+            time_str = f"{tp['time_min']} min" if tp.get("time_min") is not None else ""
             spk = _speaker_for_time(
                 management_segments, tp.get("time_min") or 0,
                 fallback_turns=av_turns, text=tp.get("text", ""),
             )
             meta = " · ".join(x for x in [time_str, spk] if x)
-            st.markdown(f"**#{i}** `{score:+.3f}` {tp["text"]}")
+            st.markdown(f"**#{i}** `{score:+.3f}` {tp['text']}")
             if meta:
                 st.caption(meta)
     else:
@@ -724,7 +724,7 @@ peer_df = insights.get("peer_data", pd.DataFrame())
 if not peer_df.empty and "is_selected" in peer_df.columns:
     display_df = peer_df[["rank", "ticker", "mci", "qa_stress", "signal", "is_selected"]].copy()
     display_df["ticker"] = display_df.apply(
-        lambda r: f"● {r["ticker"]}" if r["is_selected"] else r["ticker"], axis=1
+        lambda r: f"● {r['ticker']}" if r["is_selected"] else r["ticker"], axis=1
     )
     display_df = display_df.rename(columns={
         "rank": "#", "ticker": "Ticker", "mci": "MCI",
