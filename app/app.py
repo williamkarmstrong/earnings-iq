@@ -111,7 +111,9 @@ transcript_text   = None
 audio_features    = {}
 av_turns          = []
 title_map         = {}
-
+is_demo_cached = False
+demo_mode = False
+demo_json = ""
 if transcript_only:
     # --- Transcript-only mode: skip all audio processing ---
     status.text("Fetching Alpha Vantage transcript")
@@ -137,8 +139,9 @@ else:
     demo_dir = f"demo/{ticker}_{year}_{period}"
     demo_json = f"{demo_dir}/results.json"
     demo_mode = os.path.isdir(demo_dir)
+    is_demo_cached = demo_mode and os.path.exists(demo_json)
 
-    if demo_mode and os.path.exists(demo_json):
+    if is_demo_cached:
         status.text("Loading fully processed results from demo cache...")
         try:
             with open(demo_json, "r", encoding="utf-8") as f:
@@ -148,6 +151,11 @@ else:
             transcript_text = data.get("transcript_text", "")
             av_turns = data.get("av_turns", [])
             title_map = data.get("title_map", {})
+            qoq_data_cached = data.get("qoq_data", [])
+            nsi_cached = data.get("nsi", {})
+            peer_data_cached = data.get("peer_data", [])
+            es_result_cached = data.get("es_result", {})
+            
             audio_result = f"{demo_dir} cache"
             audio_path = f"{demo_dir}/audio.mp3"
             progress.progress(80)
@@ -202,20 +210,6 @@ else:
                 pipeline_warnings.append(f"Audio features failed: {e}")
                 audio_features = {}
                 
-        # Save demo cache if the folder exists but no cache was found
-        if demo_mode and enriched_segments:
-            try:
-                status.text("Saving processed transcript to demo directory...")
-                with open(demo_json, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "enriched_segments": enriched_segments,
-                        "audio_features": audio_features,
-                        "transcript_text": transcript_text if transcript_text is not None else "",
-                        "av_turns": av_turns,
-                        "title_map": title_map
-                    }, f)
-            except Exception as e:
-                pipeline_warnings.append(f"Failed to save demo cache: {e}")
 
         else:
             st.warning(f"{audio_result} -- falling back to Alpha Vantage transcript.")
@@ -323,100 +317,128 @@ except Exception:
 prev_quarters = get_previous_quarters(period, year, n=6)
 qoq_data = []  # list of {label, sentiment, positive, negative, hedge_freq}
 
-# Current quarter first
-current_stats = {
-    "label":      f"{period} {year} (current)",
-    "sentiment":  overall_sentiment,
-    "positive":   current_positive,
-    "negative":   current_negative,
-    "hedge_freq": insights["hedge_frequency"],
-}
-qoq_data.append(current_stats)
+# If offline demo data is cached, bypass all remaining API calls
+if is_demo_cached and qoq_data_cached and nsi_cached:
+    qoq_data = qoq_data_cached
+    nsi = nsi_cached
+    insights["peer_data"] = pd.DataFrame(peer_data_cached)
+    es_result = es_result_cached
+    status.empty()
+    progress.empty()
+else:
+    # Current quarter first
+    current_stats = {
+        "label":      f"{period} {year} (current)",
+        "sentiment":  overall_sentiment,
+        "positive":   current_positive,
+        "negative":   current_negative,
+        "hedge_freq": insights["hedge_frequency"],
+    }
+    qoq_data.append(current_stats)
 
-historical_stats = []
-for prev_period, prev_year in prev_quarters:
-    try:
-        status.text(f"Fetching {ticker} {prev_period} {prev_year} for history...")
-        prev_text, _ = fetch_transcript_cached(ticker, prev_period, prev_year)
-        if prev_text:
-            prev_stats = analyse_transcript_text(prev_text)
-            row = {
-                "label":      f"{prev_period} {prev_year}",
-                "sentiment":  prev_stats["sentiment"],
-                "positive":   prev_stats["positive"],
-                "negative":   prev_stats["negative"],
-                "hedge_freq": prev_stats["hedge_freq"],
-            }
-            qoq_data.append(row)
-            historical_stats.append(prev_stats)
-    except Exception:
-        pass
+    historical_stats = []
+    for prev_period, prev_year in prev_quarters:
+        try:
+            status.text(f"Fetching {ticker} {prev_period} {prev_year} for history...")
+            prev_text, _ = fetch_transcript_cached(ticker, prev_period, prev_year)
+            if prev_text:
+                prev_stats = analyse_transcript_text(prev_text)
+                row = {
+                    "label":      f"{prev_period} {prev_year}",
+                    "sentiment":  prev_stats["sentiment"],
+                    "positive":   prev_stats["positive"],
+                    "negative":   prev_stats["negative"],
+                    "hedge_freq": prev_stats["hedge_freq"],
+                }
+                qoq_data.append(row)
+                historical_stats.append(prev_stats)
+        except Exception:
+            pass
 
-# Narrative Shift Index -- sigma vs prior history
-nsi = compute_nsi(current_stats, historical_stats)
+    # Narrative Shift Index -- sigma vs prior history
+    nsi = compute_nsi(current_stats, historical_stats)
 
-# Build real peer comparison DataFrame by fetching/analysing peer transcripts.
-# Uses st.cache_data so previously-analysed tickers load instantly.
-_peer_tickers = insights.get("peer_tickers", [])
-_live_text_mci = multimodal_result.get("text_mci", round(((overall_sentiment + 1) / 2) * 100, 1))
-_live_qa_stress = round(insights.get("qa_decay", 0.0), 3)
-_live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci <= SIGNAL_MCI_WATCH else "Neutral"
+    # Build real peer comparison DataFrame by fetching/analysing peer transcripts.
+    # Uses st.cache_data so previously-analysed tickers load instantly.
+    _peer_tickers = insights.get("peer_tickers", [])
+    _live_text_mci = multimodal_result.get("text_mci", round(((overall_sentiment + 1) / 2) * 100, 1))
+    _live_qa_stress = round(insights.get("qa_decay", 0.0), 3)
+    _live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci <= SIGNAL_MCI_WATCH else "Neutral"
 
-_peer_rows = []
-for _pt in _peer_tickers:
-    if _pt.upper() == ticker.upper():
-        _peer_rows.append({
-            "ticker":      ticker.upper(),
-            "mci":         _live_text_mci,
-            "qa_stress":   _live_qa_stress,
-            "signal":      _live_signal,
-            "is_selected": True,
-        })
-    else:
-        _res = _analyse_peer(_pt, period, year)
-        if _res:
+    _peer_rows = []
+    for _pt in _peer_tickers:
+        if _pt.upper() == ticker.upper():
             _peer_rows.append({
-                "ticker":      _pt.upper(),
-                "mci":         _res["mci"],
-                "qa_stress":   _res["qa_stress"],
-                "signal":      _res["signal"],
-                "is_selected": False,
+                "ticker":      ticker.upper(),
+                "mci":         _live_text_mci,
+                "qa_stress":   _live_qa_stress,
+                "signal":      _live_signal,
+                "is_selected": True,
             })
         else:
-            _peer_rows.append({
-                "ticker":      _pt.upper(),
-                "mci":         None,
-                "qa_stress":   None,
-                "signal":      "N/A",
-                "is_selected": False,
-            })
+            _res = _analyse_peer(_pt, period, year)
+            if _res:
+                _peer_rows.append({
+                    "ticker":      _pt.upper(),
+                    "mci":         _res["mci"],
+                    "qa_stress":   _res["qa_stress"],
+                    "signal":      _res["signal"],
+                    "is_selected": False,
+                })
+            else:
+                _peer_rows.append({
+                    "ticker":      _pt.upper(),
+                    "mci":         None,
+                    "qa_stress":   None,
+                    "signal":      "N/A",
+                    "is_selected": False,
+                })
 
-if _peer_rows:
-    _peer_df = pd.DataFrame(_peer_rows)
-    _peer_df = _peer_df.sort_values(
-        "mci",
-        ascending=False,
-        key=lambda s: s.fillna(-1)
-    ).reset_index(drop=True)
-    _peer_df["rank"] = _peer_df.index + 1
-    _valid_mci = _peer_df.loc[~_peer_df["is_selected"] & _peer_df["mci"].notna(), "mci"]
-    _peer_avg = _valid_mci.mean() if not _valid_mci.empty else _live_text_mci
-    _peer_df["delta_vs_peers"] = (_peer_df["mci"] - _peer_avg).round(1)
-    insights["peer_data"] = _peer_df
-else:
-    insights["peer_data"] = pd.DataFrame()
+    if _peer_rows:
+        _peer_df = pd.DataFrame(_peer_rows)
+        _peer_df = _peer_df.sort_values(
+            "mci",
+            ascending=False,
+            key=lambda s: s.fillna(-1)
+        ).reset_index(drop=True)
+        _peer_df["rank"] = _peer_df.index + 1
+        _valid_mci = _peer_df.loc[~_peer_df["is_selected"] & _peer_df["mci"].notna(), "mci"]
+        _peer_avg = _valid_mci.mean() if not _valid_mci.empty else _live_text_mci
+        _peer_df["delta_vs_peers"] = (_peer_df["mci"] - _peer_avg).round(1)
+        insights["peer_data"] = _peer_df
+    else:
+        insights["peer_data"] = pd.DataFrame()
 
-progress.progress(100)
-status.empty()
-progress.empty()
+    progress.progress(100)
+    status.empty()
+    progress.empty()
 
-# Event study — runs in parallel with dashboard render (cached after first run)
-status.text("Running event study...")
-try:
-    es_result = run_event_study(ticker, period, year)
-except Exception as _es_e:
-    es_result = {"error": str(_es_e)}
-status.empty()
+    # Event study — runs in parallel with dashboard render (cached after first run)
+    status.text("Running event study...")
+    try:
+        es_result = run_event_study(ticker, period, year)
+    except Exception as _es_e:
+        es_result = {"error": str(_es_e)}
+    status.empty()
+
+    # SAVE ALL NATIVE AND OFFLINE CACHING
+    if demo_mode and enriched_segments:
+        try:
+            with open(demo_json, "w", encoding="utf-8") as f:
+                json.dump({
+                    "enriched_segments": enriched_segments,
+                    "audio_features": audio_features,
+                    "transcript_text": transcript_text if transcript_text is not None else "",
+                    "av_turns": av_turns,
+                    "title_map": title_map,
+                    "qoq_data": qoq_data,
+                    "nsi": nsi,
+                    "peer_data": insights["peer_data"].to_dict("records") if not insights["peer_data"].empty else [],
+                    "es_result": es_result
+                }, f, default=str)
+        except Exception as e:
+            pipeline_warnings.append(f"Failed to save demo cache: {e}")
+
 
 for w in pipeline_warnings:
     st.warning(w)
