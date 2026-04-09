@@ -31,7 +31,8 @@ def _analyse_peer(peer_ticker, period, year):
 def is_valid_ticker(ticker):
     """Quick yfinance check to catch typos before running the pipeline."""
     try:
-        return yf.Ticker(ticker).fast_info["lastPrice"] is not None
+        hist = yf.Ticker(ticker).history(period="1d")
+        return hist.empty is False
     except Exception:
         return False
 
