@@ -1,4 +1,20 @@
 # Earnings-IQ
+## Demo Information
+1. Use the following link for the live demo https://earningsiq.streamlit.app/
+2. Try out the following prompts that have been saved for speed:
+   a. Tesla (TSLA) Q1 2024
+   b. Boeing (BA) Q3 2024
+   c. Intel (INTC) Q2 2024
+3. Our yt-dlp audio file ingestion tool is unavailable on the cloud hosted server and the system will gracefully degrade to transcript only
+4. For custom multimodal analysis follow the installation instructions below
+
+## Installation
+In your terminal run the following commands
+1. git clone https://github.com/williamkarmstrong/earnings-iq
+2. cd earnings-iq
+3. pip install -r requirements.txt
+4. create a .streamlit/secrets.toml file and using .streamlit/secrets.toml.example as a template, add API keys
+   
 ## Overview
 The proposed solution allows users to interact with an AI-powered analysis dashboard that automatically collects, processes, and analyses company earnings calls. The platform will ingest both earnings call audio and transcripts, enabling deeper analysis of not only what executives say but how they say it. By combining speech processing with language analysis, the tool reduces manual analysis time while providing unique insights such as cross-company comparisons and highlighting significant changes in tone or sentiment across reporting periods.
 
