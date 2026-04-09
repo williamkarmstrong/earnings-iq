@@ -11,6 +11,12 @@ import os
 import torch
 import spacy
 import streamlit as st
+
+# Monkey-patch torchaudio to bypass missing set_audio_backend in newer versions
+import torchaudio
+if not hasattr(torchaudio, "set_audio_backend"):
+    torchaudio.set_audio_backend = lambda x: None
+
 from pyannote.audio import Pipeline
 
 @st.cache_data(show_spinner=False)
@@ -40,7 +46,7 @@ def map_speakers(audio_path, transcription_result):
     try:
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            token=hf_token
+            use_auth_token=hf_token
         )
         if torch.backends.mps.is_available():
             pipeline.to(torch.device("mps"))
