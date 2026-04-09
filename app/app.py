@@ -155,6 +155,8 @@ else:
             nsi_cached = data.get("nsi", {})
             peer_data_cached = data.get("peer_data", [])
             es_result_cached = data.get("es_result", {})
+            if "ar_series" in es_result_cached and isinstance(es_result_cached["ar_series"], list):
+                es_result_cached["ar_series"] = pd.DataFrame(es_result_cached["ar_series"])
             
             audio_result = f"{demo_dir} cache"
             audio_path = f"{demo_dir}/audio.mp3"
@@ -323,6 +325,8 @@ if is_demo_cached and qoq_data_cached and nsi_cached:
     nsi = nsi_cached
     insights["peer_data"] = pd.DataFrame(peer_data_cached)
     es_result = es_result_cached
+    if isinstance(es_result.get("ar_series"), list):
+        es_result["ar_series"] = pd.DataFrame(es_result["ar_series"])
     status.empty()
     progress.empty()
 else:
@@ -424,6 +428,10 @@ else:
     # SAVE ALL NATIVE AND OFFLINE CACHING
     if demo_mode and enriched_segments:
         try:
+            _es_serial = es_result.copy()
+            if "ar_series" in _es_serial and isinstance(_es_serial["ar_series"], pd.DataFrame):
+                _es_serial["ar_series"] = _es_serial["ar_series"].to_dict("records")
+                
             with open(demo_json, "w", encoding="utf-8") as f:
                 json.dump({
                     "enriched_segments": enriched_segments,
@@ -434,7 +442,7 @@ else:
                     "qoq_data": qoq_data,
                     "nsi": nsi,
                     "peer_data": insights["peer_data"].to_dict("records") if not insights["peer_data"].empty else [],
-                    "es_result": es_result
+                    "es_result": _es_serial
                 }, f, default=str)
         except Exception as e:
             pipeline_warnings.append(f"Failed to save demo cache: {e}")
