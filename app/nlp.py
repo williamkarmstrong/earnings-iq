@@ -93,7 +93,7 @@ def weighted_segment_mean(segments, field="sentiment_score", min_words=8):
         return 0.0
     return round(sum(v * w for v, w in qualifying) / total_w, 4)
 
-
+@st.cache_data(show_spinner=False)
 def analyse_segments(mapped_segments, batch_size=16):
     """
     Core function -- run FinBERT over Whisper segments in batches.

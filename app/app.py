@@ -17,7 +17,8 @@ This file connects all parts of the system together and runs the full pipeline:
 4. Generate insights & Multimodal Analysis
 5. Display results in the dashboard (Streamlit)
 """
-
+import os
+import json
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -132,70 +133,108 @@ if transcript_only:
     }
 
 else:
-    # --- Audio mode ---
-    status.text(f"Fetching audio for {ticker} {period} {year}...")
-    audio_path, audio_result = fetch_audio(ticker, period, year)
-    progress.progress(15)
+    # --- Try Demo Folder First ---
+    demo_dir = f"demo/{ticker}_{year}_{period}"
+    demo_json = f"{demo_dir}/results.json"
+    demo_mode = os.path.isdir(demo_dir)
 
-    if audio_path:
+    if demo_mode and os.path.exists(demo_json):
+        status.text("Loading fully processed results from demo cache...")
         try:
-            status.text("Transcribing with Whisper (cached after first run)...")
-            transcription = transcribe_audio(audio_path)
-            progress.progress(35)
+            with open(demo_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            enriched_segments = data.get("enriched_segments", [])
+            audio_features = data.get("audio_features", {})
+            transcript_text = data.get("transcript_text", "")
+            av_turns = data.get("av_turns", [])
+            title_map = data.get("title_map", {})
+            audio_result = f"{demo_dir} cache"
+            audio_path = f"{demo_dir}/audio.mp3"
+            progress.progress(80)
         except Exception as e:
-            pipeline_warnings.append(f"Whisper failed: {e}")
-            transcription = {"segments": [], "text": ""}
-
-        try:
-            status.text("Speaker diarization...")
-            mapped_segments = map_speakers(audio_path, transcription)
-            # Resolve SPEAKER_XX -> real names using AV transcript if available
-            try:
-                av_text, _ = fetch_transcript_cached(ticker, period, year)
-                if av_text:
-                    av_turns, title_map = parse_av_speakers(av_text)
-                    mapped_segments = resolve_speaker_names(mapped_segments, av_turns, title_map)
-            except Exception:
-                pass
-            progress.progress(50)
-        except Exception as e:
-            pipeline_warnings.append(f"Diarization failed: {e}")
-            mapped_segments = transcription.get("segments", [])
-
-        try:
-            status.text("FinBERT sentiment (batched)...")
-            enriched_segments = analyse_segments(mapped_segments)
-            progress.progress(60)
-        except Exception as e:
-            pipeline_warnings.append(f"Sentiment failed: {e}")
-            enriched_segments = []
-
-        try:
-            status.text("Audio features (cached after first run)...")
-            audio_features = extract_audio_features(audio_path)
-            progress.progress(75)
-        except Exception as e:
-            pipeline_warnings.append(f"Audio features failed: {e}")
-            audio_features = {}
-
-    else:
-        st.warning(f"{audio_result} -- falling back to Alpha Vantage transcript.")
-        try:
-            transcript_text, err = fetch_transcript_cached(ticker, period, year)
-            if not transcript_text:
-                st.error(f"Could not retrieve transcript: {err}")
-                st.stop()
-            st.success("Alpha Vantage transcript retrieved.")
-        except Exception as e:
-            st.error(f"Transcript fetch failed: {e}")
+            st.error(f"Failed to load demo cache: {e}")
             st.stop()
-        audio_features = {
-            "confidence_proxy": 0.5,
-            "pause_ratio": 0.3,
-            "pitch_mean": 150,
-            "pitch_std": 30,
-        }
-        progress.progress(50)
+    else:
+        # --- Audio mode ---
+        status.text(f"Fetching audio for {ticker} {period} {year}...")
+        audio_path, audio_result = fetch_audio(ticker, period, year)
+        progress.progress(15)
+
+        if audio_path:
+            try:
+                status.text("Transcribing with Whisper (cached after first run)...")
+                transcription = transcribe_audio(audio_path)
+                progress.progress(35)
+            except Exception as e:
+                pipeline_warnings.append(f"Whisper failed: {e}")
+                transcription = {"segments": [], "text": ""}
+
+            try:
+                status.text("Speaker diarization...")
+                mapped_segments = map_speakers(audio_path, transcription)
+                # Resolve SPEAKER_XX -> real names using AV transcript if available
+                try:
+                    av_text, _ = fetch_transcript_cached(ticker, period, year)
+                    if av_text:
+                        transcript_text = av_text
+                        av_turns, title_map = parse_av_speakers(av_text)
+                        mapped_segments = resolve_speaker_names(mapped_segments, av_turns, title_map)
+                except Exception:
+                    pass
+                progress.progress(50)
+            except Exception as e:
+                pipeline_warnings.append(f"Diarization failed: {e}")
+                mapped_segments = transcription.get("segments", [])
+
+            try:
+                status.text("FinBERT sentiment (batched)...")
+                enriched_segments = analyse_segments(mapped_segments)
+                progress.progress(60)
+            except Exception as e:
+                pipeline_warnings.append(f"Sentiment failed: {e}")
+                enriched_segments = []
+
+            try:
+                status.text("Audio features (cached after first run)...")
+                audio_features = extract_audio_features(audio_path)
+                progress.progress(75)
+            except Exception as e:
+                pipeline_warnings.append(f"Audio features failed: {e}")
+                audio_features = {}
+                
+        # Save demo cache if the folder exists but no cache was found
+        if demo_mode and enriched_segments:
+            try:
+                status.text("Saving processed transcript to demo directory...")
+                with open(demo_json, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "enriched_segments": enriched_segments,
+                        "audio_features": audio_features,
+                        "transcript_text": transcript_text if transcript_text is not None else "",
+                        "av_turns": av_turns,
+                        "title_map": title_map
+                    }, f)
+            except Exception as e:
+                pipeline_warnings.append(f"Failed to save demo cache: {e}")
+
+        else:
+            st.warning(f"{audio_result} -- falling back to Alpha Vantage transcript.")
+            try:
+                transcript_text, err = fetch_transcript_cached(ticker, period, year)
+                if not transcript_text:
+                    st.error(f"Could not retrieve transcript: {err}")
+                    st.stop()
+                st.success("Alpha Vantage transcript retrieved.")
+            except Exception as e:
+                st.error(f"Transcript fetch failed: {e}")
+                st.stop()
+            audio_features = {
+                "confidence_proxy": 0.5,
+                "pause_ratio": 0.3,
+                "pitch_mean": 150,
+                "pitch_std": 30,
+            }
+            progress.progress(50)
 
 # Clip coverage
 if enriched_segments:

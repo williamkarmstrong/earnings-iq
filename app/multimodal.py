@@ -10,7 +10,7 @@ a pattern Hajek & Munk (2023) show has predictive value for financial outcomes.
 
 import numpy as np
 import pandas as pd
-
+import streamlit as st
 
 def compute_text_mci(sentiment_score):
     """
@@ -181,7 +181,7 @@ def compute_speaker_mci(enriched_segments, audio_features, qa_start_time=None):
     results.sort(key=lambda x: (x["section"], x["speaker"]))
     return results
 
-
+@st.cache_data(show_spinner=False)
 def analyse_multimodal(text_sentiment, audio_features, enriched_segments=None, qa_start_time=None):
     """
     Main entry point — runs all multimodal computations and returns

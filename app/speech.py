@@ -75,6 +75,7 @@ def map_speakers(audio_path, transcription_result):
 
     return mapped_segments
 
+@st.cache_data(show_spinner=False)
 def resolve_speaker_names(diarized_segments, av_turns, title_map=None):
     """
     Map speaker labels to real names from an Alpha Vantage transcript.

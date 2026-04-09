@@ -6,7 +6,7 @@ with cached real call data in the next iteration.
 """
 
 import pandas as pd
-
+import streamlit as st
 
 # Signal thresholds — calibrated to the concept paper's NVDA case example
 # (MCI=61, divergence=-0.38) as a reference point.
@@ -364,7 +364,7 @@ def get_peer_tickers(ticker):
     tickers = [item["ticker"] for item in _PEER_UNIVERSE[sector_key]["data"]]
     return tickers, sector_label
 
-
+@st.cache_data(show_spinner=False)
 def generate_insights(multimodal_result, hedge_data, prepared_sentiment, qa_sentiment, ticker):
     """
     Main entry point — assembles the full insights package that app.py consumes.
