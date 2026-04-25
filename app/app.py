@@ -325,7 +325,7 @@ else:
     for prev_period, prev_year in prev_quarters:
         try:
             status.text(f"Fetching {ticker} {prev_period} {prev_year} for history...")
-            prev_text, _ = fetch_transcript_cached(ticker, prev_period, prev_year)
+            prev_text, _ = fetch_transcript(ticker, prev_period, prev_year)
             if prev_text:
                 prev_stats = analyse_transcript_text(prev_text)
                 row = {

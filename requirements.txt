@@ -1,6 +1,6 @@
 librosa==0.11.0
-openai_whisper==20250625
-pandas>=2.0,<3.0
+openai-whisper==20250625
+pandas==2.2.3
 plotly==6.6.0
 python-dotenv==1.2.2
 requests==2.33.0
@@ -9,10 +9,10 @@ streamlit==1.55.0
 transformers==5.4.0
 yt-dlp>=2024.3.10
 yfinance>=0.2.36
-pyannote.audio==3.1.1
-torch==2.1.2
-torchvision==0.16.2
-torchaudio==2.1.2
-numpy>=1.26.4,<2.0.0
+pyannote.audio==3.3.1
+torch==2.9.0
+torchvision==0.24.0
+torchaudio==2.9.0
+numpy==1.26.4
 
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl

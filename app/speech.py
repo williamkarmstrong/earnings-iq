@@ -6,6 +6,36 @@ Handles converting audio into text and identifying speakers.
 Output: clean transcript + speaker segments
 """
 
+import sys
+import dataclasses
+import numpy as np
+import torchaudio
+
+# Compatibility patches must run before pyannote is imported
+if not hasattr(np, "NaN"):
+    np.NaN = np.nan
+if not hasattr(np, "float"):
+    np.float = float
+if not hasattr(np, "int"):
+    np.int = int
+
+if not hasattr(torchaudio, "set_audio_backend"):
+    torchaudio.set_audio_backend = lambda backend: None
+if not hasattr(torchaudio, "list_audio_backends"):
+    torchaudio.list_audio_backends = lambda: ["soundfile"]
+if not hasattr(torchaudio, "AudioMetaData"):
+    @dataclasses.dataclass
+    class _AudioMetaData:
+        sample_rate: int
+        num_frames: int
+        num_channels: int
+        bits_per_sample: int
+        encoding: str
+    torchaudio.AudioMetaData = _AudioMetaData
+
+sys.modules['numpy'] = np
+sys.modules['torchaudio'] = torchaudio
+
 import whisper
 import os
 import torch
@@ -14,30 +44,6 @@ import streamlit as st
 import re as _re
 from collections import defaultdict, Counter
 from pyannote.audio import Pipeline
-
-import numpy as np
-import torchaudio
-import sys
-
-# 1. NumPy 2.0+ Compatibility Patch
-if not hasattr(np, "NaN"):
-    np.NaN = np.nan
-if not hasattr(np, "float"):
-    np.float = float
-if not hasattr(np, "int"):
-    np.int = int
-
-# 2. TorchAudio 2.9+ Compatibility Patch
-# Pyannote calls set_audio_backend, which is now removed. 
-# We replace it with a 'no-op' function (a function that does nothing).
-if not hasattr(torchaudio, "set_audio_backend"):
-    torchaudio.set_audio_backend = lambda backend: None 
-if not hasattr(torchaudio, "list_audio_backends"):
-    torchaudio.list_audio_backends = lambda: ["soundfile"]
-
-# Ensure these are globally available for all sub-modules
-sys.modules['numpy'] = np
-sys.modules['torchaudio'] = torchaudio
 
 @st.cache_data(show_spinner=False)
 def transcribe_audio(audio_path):
