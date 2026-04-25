@@ -126,7 +126,7 @@ else:
 # 2. Transcript Only Mode: Check Transcript Exists
 if transcript_only:
     if not av_json:
-        st.error(f"Could not load transcript: {err}")
+        st.error(f"Could not load transcript: {av_err}")
         st.stop()
 
     progress.progress(50)
@@ -201,7 +201,7 @@ else:
             status.text("Defaulting to transcript-only mode.")
 
             if not av_text:
-                st.error(f"Could not retrieve transcript: {err}")
+                st.error(f"Could not retrieve transcript: {av_err}")
                 st.stop()
 
             transcript_only = True
@@ -296,10 +296,6 @@ try:
 except Exception:
     keywords = []
 
-# Historical: fetch previous 6 quarters (cached -- no API calls on repeat)
-prev_quarters = get_previous_quarters(period, year, n=6)
-qoq_data = []  # list of {label, sentiment, positive, negative, hedge_freq}
-
 # If offline demo data is cached, bypass all remaining API calls
 if is_demo_cached and qoq_data_cached and nsi_cached:
     qoq_data = qoq_data_cached
@@ -311,6 +307,10 @@ if is_demo_cached and qoq_data_cached and nsi_cached:
     status.empty()
     progress.empty()
 else:
+    # Historical: fetch previous 6 quarters (cached -- no API calls on repeat)
+    prev_quarters = get_previous_quarters(period, year, n=6)
+    qoq_data = []  # list of {label, sentiment, positive, negative, hedge_freq}
+
     # Current quarter first
     current_stats = {
         "label":      f"{period} {year} (current)",
