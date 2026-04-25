@@ -21,26 +21,22 @@ import os
 import json
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
-import numpy as np
-import yfinance as yf
-import html as _html_lib
 
-from ingestion import fetch_av_transcript, fetch_audio, fetch_transcript
+from ingestion import fetch_audio, fetch_transcript
 from event_study import run_event_study, get_sector_sensitivity_df, compute_sector_earnings_sensitivity
 from speech import transcribe_audio, map_speakers, resolve_speaker_names, is_management_speaker
 from nlp import (
     analyse_segments, analyse_sentiment, get_hedging_frequency,
     split_prepared_vs_qa, get_top_keywords, extract_key_insights,
     extract_talking_points, analyse_transcript_text, compute_nsi,
-    parse_av_speakers, _finbert_available, compute_text_qa_stress,
+    parse_av_speakers,
     weighted_segment_mean, find_qa_start_time
 )
-from audio import extract_audio_features, _wav2vec2_available
+from audio import extract_audio_features
 from multimodal import analyse_multimodal
-from insights import generate_insights, get_peer_tickers, SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
-from utils import _analyse_peer, get_previous_quarters, _esc, _speaker_from_turns, sentiment_colour, _speaker_for_time, _key_takeaways, is_valid_ticker
+from insights import generate_insights, SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
+from utils import _analyse_peer, get_previous_quarters, _speaker_from_turns, _speaker_for_time, _key_takeaways, is_valid_ticker
 
 st.set_page_config(page_title="EarningsIQ", layout="wide")
 
@@ -60,7 +56,7 @@ with st.sidebar:
     transcript_only = st.toggle(
         "Transcript-only mode",
         value=False,
-        help="ON: skips audio (Whisper/Wav2Vec2/librosa) -- uses Alpha Vantage transcript only. "
+        help="ON: skips audio (Whisper/Wav2Vec2/librosa) uses Alpha Vantage transcript only. "
              "Faster for UI testing. OFF (default): full multimodal pipeline.",
     )
     if transcript_only:
@@ -75,7 +71,7 @@ with st.sidebar:
         st.markdown("""
 **MCI (0-100):** FinBERT 40% + Wav2Vec2 35% + Pause 15% + Pitch 10% *(full multimodal)*
 
-**MCI in peer table:** FinBERT text-only for fair cross-peer comparison
+**MCI in peer table:** FinBERT text only for fair cross peer comparison
 
 **NSI (sigma):** Sentiment z-score vs prior 6 quarters
 
@@ -89,7 +85,7 @@ with st.sidebar:
 # ============================================================
 # MAIN
 # ============================================================
-st.title("EarningsIQ - Multimodal Earnings Analysis")
+st.title("EarningsIQ - Multimodal Earnings Call Analysis")
 
 if not run:
     st.info("Select a ticker and quarter in the sidebar, then click **Analyse Call**.")
@@ -136,7 +132,7 @@ if transcript_only:
         st.stop()
 
     progress.progress(50)
-    st.success("Transcript loaded (transcript-only mode -- audio skipped).")
+    st.success("Transcript loaded (transcript only mode, audio analysis skipped).")
 
     audio_features = {
         "confidence_proxy": 0.5,
@@ -461,7 +457,7 @@ def _key_takeaways(flags, nsi, overall_sentiment, hedge_val):
     for f in med_flags[:1]:
         items.append(("medium", f["message"]))
     if not items:
-        items.append(("low", "No high-priority signals. Tone broadly consistent with text."))
+        items.append(("low", "No high priority signals. Tone broadly consistent with text."))
     return items[:3]
 # ============================================================
 # DASHBOARD
@@ -481,7 +477,7 @@ qa_stress_val = insights.get("qa_decay", 0.0)
 if transcript_only or not enriched_segments:
     mode_badge, mode_src = "TRANSCRIPT", "Alpha Vantage"
 else:
-    src        = "EarningsCallBiz" if audio_result and "cache/" in audio_result else "YouTube fallback"
+    src        = "EarningsCallBiz" if audio_result and "cache/" in audio_result else "YouTube"
     mode_badge = "MULTIMODAL"
     mode_src   = f"{src} + Whisper | {call_duration_min:.0f} min"
 
@@ -693,7 +689,7 @@ with hist_col:
         hc1.metric("Sentiment vs prior Q", f'{current["sentiment"]:+.3f}', f'{d_sent:+.3f}')
         hc2.metric("Hedging vs prior Q", f'{current["hedge_freq"]:+.2f}', f'{d_hedge:+.2f}')
     else:
-        st.info("Fetch prior quarters by running analysis — transcripts cache locally.")
+        st.info("Historical trend data could not be retrieved. Refresh and try running the analysis again.")
 
 with div_col2:
     st.subheader("Tone-Text Divergence")
@@ -764,7 +760,7 @@ else:
         legend=dict(orientation="h", y=1.08),
     )
     st.plotly_chart(fig_sp, use_container_width=True)
-    st.caption("MCI = word-count-weighted FinBERT sentiment + audio features · Analysts and operators excluded")
+    st.caption("MCI = word count weighted FinBERT sentiment + audio features · Analysts and operators excluded")
 
 st.divider()
 
@@ -888,7 +884,7 @@ st.subheader("How EarningsIQ Analyses Calls")
 with st.expander("Data sources & ingestion", expanded=False):
     st.markdown("""
 **Audio** files are sourced from [EarningsCallBiz](https://www.earningscall.biz) and
-placed in the `cache/` directory. The pipeline reads them directly from there —
+placed in the `cache/` directory. The pipeline reads them directly from there 
 no re-download occurs on repeat runs. If no cached file is found for a ticker/quarter,
 yt-dlp attempts a YouTube fallback; if that also fails (common on cloud hosts),
 the pipeline degrades gracefully to transcript-only mode.
@@ -907,23 +903,23 @@ with st.expander("Transcript analysis — how sentiment is measured", expanded=F
     st.markdown("""
 **Model**: [FinBERT](https://huggingface.co/ProsusAI/finbert) — a BERT model fine-tuned on
 financial text (earnings call transcripts, SEC filings, financial news). It outperforms
-general-purpose sentiment models on earnings call language because it understands
-domain-specific phrases like "headwinds", "beat consensus", and "margin expansion".
+general purpose sentiment models on earnings call language because it understands
+domain specific phrases like "headwinds", "beat consensus", and "margin expansion".
 
-**Segment-level scoring**: Whisper splits the audio into natural speech segments
+**Segment level scoring**: Whisper splits the audio into natural speech segments
 (typically 5–20 seconds each). FinBERT scores each segment independently, producing
-a time-stamped sentiment trajectory rather than a single bulk score. This powers the
+a timestamped sentiment trajectory rather than a single bulk score. This powers the
 intra-call timeline chart.
 
-**Word-count weighting**: When aggregating across segments, each segment is weighted
+**Word count weighting**: When aggregating across segments, each segment is weighted
 by its word count. Filler phrases ("Thank you", "That's a great question") carry
 proportionally less weight than 100-word explanations of operating leverage.
 Segments under 8 words are excluded from aggregates entirely.
 
-**Multi-sample for history**: When analysing previous quarters for QoQ comparison,
-5 evenly-spaced 1,500-character windows are sampled across the transcript, skipping
+**Multi sample for history**: When analysing previous quarters for QoQ comparison,
+5 evenly spaced 1,500 character windows are sampled across the transcript, skipping
 the first 10% (safe harbour boilerplate). Their scores are averaged for a fair
-cross-quarter comparison.
+cross quarter comparison.
 
 **Sentiment score**: `positive_probability − negative_probability`, range [−1, +1].
 Zero = neutral; +1 = maximally positive; −1 = maximally negative.
@@ -953,8 +949,8 @@ speakers (CEO, CFO, COO, etc.) contribute to MCI and sentiment scores.
 A transformer trained on 960 hours of LibriSpeech speech. Three windows are sampled
 (start, middle, end) to cover the full call without exceeding memory limits.
 The confidence proxy is derived from the **temporal coefficient of variation** of
-per-timestep embedding norms — more dynamic, engaged speech produces higher variation
-than monotone scripted delivery. This is codec-independent (unlike the raw norm).
+per timestep embedding norms. More dynamic, engaged speech produces higher variation
+than monotone scripted delivery. This is codec independent (unlike the raw norm).
 """)
 
 with st.expander("How MCI is calculated", expanded=False):
@@ -977,7 +973,7 @@ where `sentiment_norm = (FinBERT_score + 1) / 2` maps [−1, +1] → [0, 1].
 
 **Tone-text divergence** = `(Wav2Vec2 − FinBERT_norm) × 0.5`
 
-Negative divergence means acoustic confidence is below textual sentiment — a pattern
+Negative divergence means acoustic confidence is below textual sentiment, a pattern
 associated with scripted positivity masking genuine hesitation (Hajek & Munk, 2023).
 Flag threshold: −0.12.
 """)
