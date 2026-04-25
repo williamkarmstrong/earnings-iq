@@ -98,374 +98,395 @@ if not is_valid_ticker(ticker):
 # ============================================================
 # PIPELINE
 # ============================================================
-progress = st.progress(0)
-status   = st.empty()
-pipeline_warnings = []
+MIN_FULL_CALL_MINUTES = 25
 
-enriched_segments = []
-transcript_text   = None
-audio_features    = {}
-av_turns          = []
-title_map         = {}
-is_demo_cached = False
-demo_mode = False
-demo_json = ""
+@st.cache_data(show_spinner=False)
+def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> dict:
+    """
+    Run the full earnings call analysis pipeline.
+    Returns a result dict consumed by the dashboard.
+    """
+    progress = st.progress(0)
+    status   = st.empty()
+    pipeline_warnings = []
 
-# 1. Fetch Transcript from Alpha Vantage for Backup and Speaker Mapping
-# Skip in audio mode when a demo cache exists — av_turns/title_map come from cache instead.
-_demo_dir = f"demo/{ticker}_{year}_{period}"
-_demo_cache_exists = not transcript_only and os.path.isdir(_demo_dir) and os.path.exists(f"{_demo_dir}/results.json")
-if not _demo_cache_exists:
-    av_json, av_err = fetch_transcript(ticker, period, year)
-    if av_json:
-        av_turns, title_map = parse_av_speakers(av_json)
+    enriched_segments = []
+    transcript_text   = None
+    audio_features    = {}
+    av_turns          = []
+    title_map         = {}
+    audio_result      = ""
+    is_demo_cached    = False
+    demo_mode         = False
+    demo_json         = ""
+    qoq_data_cached   = None
+    nsi_cached        = None
+    peer_data_cached  = None
+    es_result_cached  = None
+
+    # 1. Fetch Transcript from Alpha Vantage for Backup and Speaker Mapping
+    # Skip in audio mode when a demo cache exists — av_turns/title_map come from cache instead.
+    _demo_dir = f"demo/{ticker}_{year}_{period}"
+    _demo_cache_exists = not transcript_only and os.path.isdir(_demo_dir) and os.path.exists(f"{_demo_dir}/results.json")
+    if not _demo_cache_exists:
+        av_json, av_err = fetch_transcript(ticker, period, year)
+        if av_json:
+            av_turns, title_map = parse_av_speakers(av_json)
+        else:
+            av_turns = []
+            title_map = {}
     else:
-        av_turns = []
-        title_map = {}
-else:
-    av_json, av_err = None, None
+        av_json, av_err = None, None
 
-# 2. Transcript Only Mode: Check Transcript Exists
-if transcript_only:
-    if not av_json:
-        st.error(f"Could not load transcript: {av_err}")
-        st.stop()
-
-    progress.progress(50)
-    st.success("Transcript loaded (transcript only mode, audio analysis skipped).")
-
-    audio_features = {
-        "confidence_proxy": 0.5,
-        "pause_ratio": 0.3,
-        "pitch_mean": 150,
-        "pitch_std": 30,
-    }
-else:
-    # 3. Demo Mode: Try Load Demo Results and Stop
-    demo_dir = _demo_dir
-    demo_json = f"{demo_dir}/results.json"
-    demo_mode = os.path.isdir(demo_dir)
-    is_demo_cached = _demo_cache_exists
-
-    if is_demo_cached:
-        status.text("Loading fully processed results from demo cache...")
-        try:
-            with open(demo_json, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            enriched_segments = data.get("enriched_segments", [])
-            audio_features = data.get("audio_features", {})
-            transcript_text = data.get("transcript_text", "")
-            av_turns = data.get("av_turns", [])
-            title_map = data.get("title_map", {})
-            qoq_data_cached = data.get("qoq_data", [])
-            nsi_cached = data.get("nsi", {})
-            peer_data_cached = data.get("peer_data", [])
-            es_result_cached = data.get("es_result", {})
-
-            audio_result = f"{demo_dir} cache"
-            audio_path = f"{demo_dir}/audio.mp3"
-            progress.progress(80)
-        except Exception as e:
-            st.error(f"Failed to load demo cache: {e}")
+    # 2. Transcript Only Mode: Check Transcript Exists
+    if transcript_only:
+        if not av_json:
+            st.error(f"Could not load transcript: {av_err}")
             st.stop()
 
+        progress.progress(50)
+        st.success("Transcript loaded (transcript only mode, audio analysis skipped).")
+
+        audio_features = {
+            "confidence_proxy": 0.5,
+            "pause_ratio": 0.3,
+            "pitch_mean": 150,
+            "pitch_std": 30,
+        }
     else:
-        # 4. Audio Mode: Fetch Audio and Run Specifics
-        status.text(f"Fetching audio for {ticker} {period} {year}...")
-        audio_path, audio_result = fetch_audio(ticker, period, year)
-        progress.progress(15)
+        # 3. Demo Mode: Try Load Demo Results and Stop
+        demo_dir = _demo_dir
+        demo_json = f"{demo_dir}/results.json"
+        demo_mode = os.path.isdir(demo_dir)
+        is_demo_cached = _demo_cache_exists
 
-        if audio_path:
-            # A. TRANSCRIPTION
-            status.text("Transcribing with Whisper...")
-            transcription = transcribe_audio(audio_path)
-            progress.progress(35)
-        
-            # B. DIARIZATION & NAME RESOLUTION
-            status.text("Speaker diarization...")
-            mapped_segments = map_speakers(audio_path, transcription)
-            enriched_segments = resolve_speaker_names(mapped_segments, av_turns, title_map)
-            progress.progress(50)
-            
-            # C. SENTIMENT & FEATURES
-            status.text("FinBERT sentiment (batched)...")
-            enriched_segments = analyse_segments(enriched_segments)
-            progress.progress(60)
-            status.text("Audio features (cached after first run)...")
-            audio_features = extract_audio_features(audio_path)
-            progress.progress(75)
-        else:
-            st.warning(f"Failed to fetch audio for {ticker} {period} {year}.")
-            status.text("Defaulting to transcript-only mode.")
+        if is_demo_cached:
+            status.text("Loading fully processed results from demo cache...")
+            try:
+                with open(demo_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
 
-            if not av_json:
-                st.error(f"Could not retrieve transcript: {av_err}")
+                enriched_segments = data.get("enriched_segments", [])
+                audio_features    = data.get("audio_features", {})
+                transcript_text   = data.get("transcript_text", "")
+                av_turns          = data.get("av_turns", [])
+                title_map         = data.get("title_map", {})
+                qoq_data_cached   = data.get("qoq_data", [])
+                nsi_cached        = data.get("nsi", {})
+                peer_data_cached  = data.get("peer_data", [])
+                es_result_cached  = data.get("es_result", {})
+
+                audio_result = f"{demo_dir} cache"
+                audio_path   = f"{demo_dir}/audio.mp3"
+                progress.progress(80)
+            except Exception as e:
+                st.error(f"Failed to load demo cache: {e}")
                 st.stop()
 
-            transcript_only = True
-            audio_features = {
-                "confidence_proxy": 0.5,
-                "pause_ratio": 0.3,
-                "pitch_mean": 150,
-                "pitch_std": 30,
-            }
-            progress.progress(50)
-            
-# 5. Continue Running Rest of Pipeline
-if enriched_segments:
-    call_duration_min = max(s.get("end", 0) for s in enriched_segments) / 60
-    is_full_call = call_duration_min >= 25
-else:
-    call_duration_min = 0.0
-    is_full_call = False
-
-# Filter to management-only segments for MCI and Q&A analysis.
-# Confirmed analysts (is_management_speaker=False) are excluded.
-# Unresolved/ambiguous speakers (None) are kept so short clips aren't left empty.
-if enriched_segments:
-    _mgmt = [s for s in enriched_segments if is_management_speaker(s.get("speaker", "")) is not False]
-    management_segments = _mgmt if _mgmt else enriched_segments
-else:
-    management_segments = []
-
-# Detect Q&A start from ALL segments (including operator turns) so the
-# operator's transition announcement is not missed after management filtering.
-qa_start_time = find_qa_start_time(enriched_segments) if enriched_segments else None
-
-# Multimodal fusion
-status.text("Multimodal analysis...")
-try:
-    if management_segments:
-        overall_sentiment = weighted_segment_mean(management_segments, "sentiment_score")
-        current_positive  = weighted_segment_mean(management_segments, "positive")
-        current_negative  = weighted_segment_mean(management_segments, "negative")
-    else:
-        _sent = analyse_sentiment(transcript_text or "")
-        overall_sentiment = _sent["score"]
-        current_positive  = _sent["positive"]
-        current_negative  = _sent["negative"]
-
-    multimodal_result = analyse_multimodal(
-        overall_sentiment, audio_features,
-        management_segments or None,
-        qa_start_time=qa_start_time,
-    )
-except Exception as e:
-    pipeline_warnings.append(f"Multimodal fusion failed: {e}")
-    multimodal_result = {"mci": 50, "tone_text_divergence": 0.0,
-                         "timeline": pd.DataFrame(), "speaker_breakdown": []}
-    overall_sentiment = 0.0
-    current_positive  = 0.0
-    current_negative  = 0.0
-
-progress.progress(88)
-
-# Insights
-status.text("Generating insights...")
-try:
-    hedge_data = get_hedging_frequency(management_segments) if management_segments else {"frequency_per_100": 0}
-    # Pass all enriched_segments as search source so operator's Q&A announcement is found
-    prepared_segs, qa_segs = split_prepared_vs_qa(management_segments, search_segments=enriched_segments)
-    prepared_sentiment = weighted_segment_mean(prepared_segs, "sentiment_score") if prepared_segs else None
-    qa_sentiment       = weighted_segment_mean(qa_segs,       "sentiment_score") if qa_segs       else None
-    insights = generate_insights(multimodal_result, hedge_data, prepared_sentiment, qa_sentiment, ticker)
-except Exception as e:
-    pipeline_warnings.append(f"Insight generation failed: {e}")
-    insights = {
-        "mci": 50, "mci_label": "N/A", "tone_text_divergence": 0.0, "divergence_label": "N/A",
-        "qa_decay": 0.0, "qa_stress": "N/A", "hedge_frequency": 0.0,
-        "flags": [], "timeline": pd.DataFrame(), "speaker_breakdown": [], "peer_data": pd.DataFrame(), "peer_tickers": [], "peer_sector": "Peer Group",
-    }
-    prepared_segs = qa_segs = []
-
-# Talking points, keywords, key insights
-try:
-    talking_points = extract_talking_points(management_segments or None, transcript_text, n=6)
-except Exception:
-    talking_points = []
-
-try:
-    key_insights = extract_key_insights(management_segments, n=5)
-except Exception:
-    key_insights = {"highlights": [], "risk_signals": []}
-
-try:
-    keywords = get_top_keywords(management_segments, transcript_text, n=15)
-except Exception:
-    keywords = []
-
-# If offline demo data is cached, bypass all remaining API calls
-if is_demo_cached:
-    qoq_data = qoq_data_cached
-    nsi = nsi_cached
-    insights["peer_data"] = pd.DataFrame(peer_data_cached)
-    es_result = es_result_cached
-    if isinstance(es_result.get("ar_series"), list):
-        es_result["ar_series"] = pd.DataFrame(es_result["ar_series"])
-    status.empty()
-    progress.empty()
-else:
-    # Historical: fetch previous 6 quarters (cached -- no API calls on repeat)
-    prev_quarters = get_previous_quarters(period, year, n=6)
-    qoq_data = []  # list of {label, sentiment, positive, negative, hedge_freq}
-
-    # Current quarter first
-    current_stats = {
-        "label":      f"{period} {year} (current)",
-        "sentiment":  overall_sentiment,
-        "positive":   current_positive,
-        "negative":   current_negative,
-        "hedge_freq": insights["hedge_frequency"],
-    }
-    qoq_data.append(current_stats)
-
-    historical_stats = []
-    for prev_period, prev_year in prev_quarters:
-        try:
-            status.text(f"Fetching {ticker} {prev_period} {prev_year} for history...")
-            prev_text, _ = fetch_transcript(ticker, prev_period, prev_year)
-            if prev_text:
-                prev_stats = analyse_transcript_text(prev_text)
-                row = {
-                    "label":      f"{prev_period} {prev_year}",
-                    "sentiment":  prev_stats["sentiment"],
-                    "positive":   prev_stats["positive"],
-                    "negative":   prev_stats["negative"],
-                    "hedge_freq": prev_stats["hedge_freq"],
-                }
-                qoq_data.append(row)
-                historical_stats.append(prev_stats)
-        except Exception:
-            pass
-
-    # Narrative Shift Index -- sigma vs prior history
-    nsi = compute_nsi(current_stats, historical_stats)
-
-    # Build real peer comparison DataFrame by fetching/analysing peer transcripts.
-    # Uses st.cache_data so previously-analysed tickers load instantly.
-    _peer_tickers = insights.get("peer_tickers", [])
-    _live_text_mci = multimodal_result.get("text_mci", round(((overall_sentiment + 1) / 2) * 100, 1))
-    _live_qa_stress = round(insights.get("qa_decay", 0.0), 3)
-    _live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci <= SIGNAL_MCI_WATCH else "Neutral"
-
-    _peer_rows = []
-    for _pt in _peer_tickers:
-        if _pt.upper() == ticker.upper():
-            _peer_rows.append({
-                "ticker":      ticker.upper(),
-                "mci":         _live_text_mci,
-                "qa_stress":   _live_qa_stress,
-                "signal":      _live_signal,
-                "is_selected": True,
-            })
         else:
-            _res = _analyse_peer(_pt, period, year)
-            if _res:
+            # 4. Audio Mode: Fetch Audio and Run Specifics
+            status.text(f"Fetching audio for {ticker} {period} {year}...")
+            audio_path, audio_result = fetch_audio(ticker, period, year)
+            progress.progress(15)
+
+            if audio_path:
+                # A. TRANSCRIPTION
+                status.text("Transcribing with Whisper...")
+                transcription = transcribe_audio(audio_path)
+                progress.progress(35)
+
+                # B. DIARIZATION & NAME RESOLUTION
+                status.text("Speaker diarization...")
+                mapped_segments   = map_speakers(audio_path, transcription)
+                enriched_segments = resolve_speaker_names(mapped_segments, av_turns, title_map)
+                progress.progress(50)
+
+                # C. SENTIMENT & FEATURES
+                status.text("FinBERT sentiment analysis...")
+                enriched_segments = analyse_segments(enriched_segments)
+                progress.progress(60)
+                status.text("Extracting audio features...")
+                audio_features = extract_audio_features(audio_path)
+                progress.progress(75)
+            else:
+                st.warning(f"Failed to fetch audio for {ticker} {period} {year}.")
+                status.text("Defaulting to transcript only mode.")
+
+                if not av_json:
+                    st.error(f"Could not retrieve transcript: {av_err}")
+                    st.stop()
+
+                transcript_only = True
+                audio_features = {
+                    "confidence_proxy": 0.5,
+                    "pause_ratio": 0.3,
+                    "pitch_mean": 150,
+                    "pitch_std": 30,
+                }
+                progress.progress(50)
+
+    # 5. Continue Running Rest of Pipeline
+    if enriched_segments:
+        call_duration_min = max(s.get("end", 0) for s in enriched_segments) / 60
+        is_full_call = call_duration_min >= MIN_FULL_CALL_MINUTES
+    else:
+        call_duration_min = 0.0
+        is_full_call = False
+
+    # Filter to management-only segments for MCI and Q&A analysis.
+    if enriched_segments:
+        _mgmt = [s for s in enriched_segments if is_management_speaker(s.get("speaker", "")) is not False]
+        management_segments = _mgmt if _mgmt else enriched_segments
+    else:
+        management_segments = []
+
+    # Detect Q&A start from all segments
+    qa_start_time = find_qa_start_time(enriched_segments) if enriched_segments else None
+
+    # Multimodal fusion
+    status.text("Multimodal analysis...")
+    try:
+        if management_segments:
+            overall_sentiment = weighted_segment_mean(management_segments, "sentiment_score")
+            current_positive  = weighted_segment_mean(management_segments, "positive")
+            current_negative  = weighted_segment_mean(management_segments, "negative")
+        else:
+            _sent = analyse_sentiment(transcript_text or "")
+            overall_sentiment = _sent["score"]
+            current_positive  = _sent["positive"]
+            current_negative  = _sent["negative"]
+
+        multimodal_result = analyse_multimodal(
+            overall_sentiment, audio_features,
+            management_segments or None,
+            qa_start_time=qa_start_time,
+        )
+    except Exception as e:
+        pipeline_warnings.append(f"Multimodal fusion failed: {e}")
+        multimodal_result = {"mci": 50, "tone_text_divergence": 0.0,
+                             "timeline": pd.DataFrame(), "speaker_breakdown": []}
+        overall_sentiment = 0.0
+        current_positive  = 0.0
+        current_negative  = 0.0
+
+    progress.progress(88)
+
+    # Insights
+    status.text("Generating insights...")
+    try:
+        hedge_data = get_hedging_frequency(management_segments) if management_segments else {"frequency_per_100": 0}
+        # Pass all enriched_segments as search source so operator's Q&A announcement is found
+        prepared_segs, qa_segs = split_prepared_vs_qa(management_segments, search_segments=enriched_segments)
+        prepared_sentiment = weighted_segment_mean(prepared_segs, "sentiment_score") if prepared_segs else None
+        qa_sentiment       = weighted_segment_mean(qa_segs,       "sentiment_score") if qa_segs       else None
+        insights = generate_insights(multimodal_result, hedge_data, prepared_sentiment, qa_sentiment, ticker)
+    except Exception as e:
+        pipeline_warnings.append(f"Insight generation failed: {e}")
+        insights = {
+            "mci": 50, "mci_label": "N/A", "tone_text_divergence": 0.0, "divergence_label": "N/A",
+            "qa_decay": 0.0, "qa_stress": "N/A", "hedge_frequency": 0.0,
+            "flags": [], "timeline": pd.DataFrame(), "speaker_breakdown": [], "peer_data": pd.DataFrame(), "peer_tickers": [], "peer_sector": "Peer Group",
+        }
+        prepared_segs = qa_segs = []
+
+    # Talking points, keywords, key insights
+    try:
+        talking_points = extract_talking_points(management_segments or None, transcript_text, n=6)
+    except Exception:
+        talking_points = []
+
+    try:
+        key_insights = extract_key_insights(management_segments, n=5)
+    except Exception:
+        key_insights = {"highlights": [], "risk_signals": []}
+
+    try:
+        keywords = get_top_keywords(management_segments, transcript_text, n=15)
+    except Exception:
+        keywords = []
+
+    # If offline demo data is cached, bypass all remaining API calls
+    if is_demo_cached:
+        qoq_data = qoq_data_cached
+        nsi      = nsi_cached
+        insights["peer_data"] = pd.DataFrame(peer_data_cached)
+        es_result = es_result_cached
+        if isinstance(es_result.get("ar_series"), list):
+            es_result["ar_series"] = pd.DataFrame(es_result["ar_series"])
+        status.empty()
+        progress.empty()
+    else:
+        # Historical: fetch previous 4 quarters (cached -- no API calls on repeat)
+        prev_quarters = get_previous_quarters(period, year, n=4)
+        qoq_data = []  # list of {label, sentiment, positive, negative, hedge_freq}
+
+        # Current quarter first
+        current_stats = {
+            "label":      f"{period} {year} (current)",
+            "sentiment":  overall_sentiment,
+            "positive":   current_positive,
+            "negative":   current_negative,
+            "hedge_freq": insights["hedge_frequency"],
+        }
+        qoq_data.append(current_stats)
+
+        historical_stats = []
+        for prev_period, prev_year in prev_quarters:
+            try:
+                status.text(f"Fetching {ticker} {prev_period} {prev_year} for history...")
+                prev_json, _ = fetch_transcript(ticker, prev_period, prev_year)
+                if prev_json:
+                    prev_text  = " ".join(item.get("content", "") for item in prev_json)
+                    prev_stats = analyse_transcript_text(prev_text)
+                    row = {
+                        "label":      f"{prev_period} {prev_year}",
+                        "sentiment":  prev_stats["sentiment"],
+                        "positive":   prev_stats["positive"],
+                        "negative":   prev_stats["negative"],
+                        "hedge_freq": prev_stats["hedge_freq"],
+                    }
+                    qoq_data.append(row)
+                    historical_stats.append(prev_stats)
+            except Exception as e:
+                pipeline_warnings.append(f"Could not fetch {ticker} {prev_period} {prev_year} for QoQ history: {e}")
+
+        # Narrative Shift Index -- sigma vs prior history
+        nsi = compute_nsi(current_stats, historical_stats)
+
+        # Build real peer comparison DataFrame by fetching/analysing peer transcripts.
+        # Uses st.cache_data so previously-analysed tickers load instantly.
+        _peer_tickers  = insights.get("peer_tickers", [])
+        _live_text_mci = multimodal_result.get("text_mci", round(((overall_sentiment + 1) / 2) * 100, 1))
+        _live_qa_stress = round(insights.get("qa_decay", 0.0), 3)
+        _live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci <= SIGNAL_MCI_WATCH else "Neutral"
+
+        _peer_rows = []
+        for _pt in _peer_tickers:
+            if _pt.upper() == ticker.upper():
                 _peer_rows.append({
-                    "ticker":      _pt.upper(),
-                    "mci":         _res["mci"],
-                    "qa_stress":   _res["qa_stress"],
-                    "signal":      _res["signal"],
-                    "is_selected": False,
+                    "ticker":      ticker.upper(),
+                    "mci":         _live_text_mci,
+                    "qa_stress":   _live_qa_stress,
+                    "signal":      _live_signal,
+                    "is_selected": True,
                 })
             else:
-                _peer_rows.append({
-                    "ticker":      _pt.upper(),
-                    "mci":         None,
-                    "qa_stress":   None,
-                    "signal":      "N/A",
-                    "is_selected": False,
-                })
+                _res = _analyse_peer(_pt, period, year)
+                if _res:
+                    _peer_rows.append({
+                        "ticker":      _pt.upper(),
+                        "mci":         _res["mci"],
+                        "qa_stress":   _res["qa_stress"],
+                        "signal":      _res["signal"],
+                        "is_selected": False,
+                    })
+                else:
+                    _peer_rows.append({
+                        "ticker":      _pt.upper(),
+                        "mci":         None,
+                        "qa_stress":   None,
+                        "signal":      "N/A",
+                        "is_selected": False,
+                    })
 
-    if _peer_rows:
-        _peer_df = pd.DataFrame(_peer_rows)
-        _peer_df = _peer_df.sort_values(
-            "mci",
-            ascending=False,
-            key=lambda s: s.fillna(-1)
-        ).reset_index(drop=True)
-        _peer_df["rank"] = _peer_df.index + 1
-        _valid_mci = _peer_df.loc[~_peer_df["is_selected"] & _peer_df["mci"].notna(), "mci"]
-        _peer_avg = _valid_mci.mean() if not _valid_mci.empty else _live_text_mci
-        _peer_df["delta_vs_peers"] = (_peer_df["mci"] - _peer_avg).round(1)
-        insights["peer_data"] = _peer_df
-    else:
-        insights["peer_data"] = pd.DataFrame()
+        if _peer_rows:
+            _peer_df = pd.DataFrame(_peer_rows)
+            _peer_df = _peer_df.sort_values(
+                "mci",
+                ascending=False,
+                key=lambda s: s.fillna(-1)
+            ).reset_index(drop=True)
+            _peer_df["rank"] = _peer_df.index + 1
+            _valid_mci = _peer_df.loc[~_peer_df["is_selected"] & _peer_df["mci"].notna(), "mci"]
+            _peer_avg  = _valid_mci.mean() if not _valid_mci.empty else _live_text_mci
+            _peer_df["delta_vs_peers"] = (_peer_df["mci"] - _peer_avg).round(1)
+            insights["peer_data"] = _peer_df
+        else:
+            insights["peer_data"] = pd.DataFrame()
 
-    progress.progress(100)
-    status.empty()
-    progress.empty()
+        progress.progress(100)
+        status.empty()
+        progress.empty()
 
-    # Event study — runs in parallel with dashboard render (cached after first run)
-    status.text("Running event study...")
-    try:
-        es_result = run_event_study(ticker, period, year)
-    except Exception as _es_e:
-        es_result = {"error": str(_es_e)}
-    status.empty()
-
-    # SAVE ALL NATIVE AND OFFLINE CACHING
-    if demo_mode and enriched_segments:
+        # Event study — runs in parallel with dashboard render (cached after first run)
+        status.text("Running event study...")
         try:
-            _es_serial = es_result.copy()
-            if "ar_series" in _es_serial and isinstance(_es_serial["ar_series"], pd.DataFrame):
-                _es_serial["ar_series"] = _es_serial["ar_series"].to_dict("records")
-                
-            with open(demo_json, "w", encoding="utf-8") as f:
-                json.dump({
-                    "enriched_segments": enriched_segments,
-                    "audio_features": audio_features,
-                    "transcript_text": transcript_text if transcript_text is not None else "",
-                    "av_turns": av_turns,
-                    "title_map": title_map,
-                    "qoq_data": qoq_data,
-                    "nsi": nsi,
-                    "peer_data": insights["peer_data"].to_dict("records") if not insights["peer_data"].empty else [],
-                    "es_result": _es_serial
-                }, f, default=str)
-        except Exception as e:
-            pipeline_warnings.append(f"Failed to save demo cache: {e}")
+            es_result = run_event_study(ticker, period, year)
+        except Exception as _es_e:
+            es_result = {"error": str(_es_e)}
+        status.empty()
+
+        # SAVE ALL NATIVE AND OFFLINE CACHING
+        if demo_mode and enriched_segments:
+            try:
+                _es_serial = es_result.copy()
+                if "ar_series" in _es_serial and isinstance(_es_serial["ar_series"], pd.DataFrame):
+                    _es_serial["ar_series"] = _es_serial["ar_series"].to_dict("records")
+
+                with open(demo_json, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "enriched_segments": enriched_segments,
+                        "audio_features":    audio_features,
+                        "transcript_text":   transcript_text if transcript_text is not None else "",
+                        "av_turns":          av_turns,
+                        "title_map":         title_map,
+                        "qoq_data":          qoq_data,
+                        "nsi":               nsi,
+                        "peer_data":         insights["peer_data"].to_dict("records") if not insights["peer_data"].empty else [],
+                        "es_result":         _es_serial,
+                    }, f, default=str)
+            except Exception as e:
+                pipeline_warnings.append(f"Failed to save demo cache: {e}")
+
+    for w in pipeline_warnings:
+        st.warning(w)
+
+    return {
+        "enriched_segments":  enriched_segments,
+        "management_segments": management_segments,
+        "overall_sentiment":  overall_sentiment,
+        "multimodal_result":  multimodal_result,
+        "audio_features":     audio_features,
+        "insights":           insights,
+        "qoq_data":           qoq_data,
+        "nsi":                nsi,
+        "es_result":          es_result,
+        "talking_points":     talking_points,
+        "key_insights":       key_insights,
+        "keywords":           keywords,
+        "av_turns":           av_turns,
+        "qa_start_time":      qa_start_time,
+        "call_duration_min":  call_duration_min,
+        "is_full_call":       is_full_call,
+        "transcript_only":    transcript_only,
+        "audio_result":       audio_result,
+    }
 
 
-for w in pipeline_warnings:
-    st.warning(w)
+result = run_pipeline(ticker, period, year, transcript_only)
 
-# ============================================================
-# DASHBOARD HELPERS
-# ============================================================
+enriched_segments   = result["enriched_segments"]
+management_segments = result["management_segments"]
+overall_sentiment   = result["overall_sentiment"]
+multimodal_result   = result["multimodal_result"]
+audio_features      = result["audio_features"]
+insights            = result["insights"]
+qoq_data            = result["qoq_data"]
+nsi                 = result["nsi"]
+es_result           = result["es_result"]
+talking_points      = result["talking_points"]
+key_insights        = result["key_insights"]
+keywords            = result["keywords"]
+av_turns            = result["av_turns"]
+qa_start_time       = result["qa_start_time"]
+call_duration_min   = result["call_duration_min"]
+is_full_call        = result["is_full_call"]
+transcript_only     = result["transcript_only"]
+audio_result        = result["audio_result"]
 
-def _speaker_for_time(segs, time_min, fallback_turns=None, text=""):
-    """Return speaker label near time_min; scans 5 nearest segments for a resolved name."""
-    if segs:
-        nearby = sorted(segs, key=lambda s: abs(s.get("start", 0) / 60 - time_min))[:5]
-        for s in nearby:
-            sp = s.get("speaker", "")
-            if sp and sp not in ("UNKNOWN", ""):
-                return sp
-    if fallback_turns and text:
-        return _speaker_from_turns(fallback_turns, text)
-    return ""
-
-def _key_takeaways(flags, nsi, overall_sentiment, hedge_val):
-    """Generate 3 plain-English takeaways from signal data."""
-    items = []
-    high_flags = [f for f in flags if f["severity"] == "high"]
-    for f in high_flags[:2]:
-        items.append(("high", f["message"]))
-    med_flags = [f for f in flags if f["severity"] == "medium"]
-    for f in med_flags[:1]:
-        items.append(("medium", f["message"]))
-    if not items:
-        items.append(("low", "No high priority signals. Tone broadly consistent with text."))
-    return items[:3]
 # ============================================================
 # DASHBOARD
 # ============================================================
-
-# ================================================================
-# BUILD RENDER DATA
-# ================================================================
 mci_val       = insights["mci"]
 div_val       = insights["tone_text_divergence"]
 hedge_val     = insights["hedge_frequency"]
@@ -477,7 +498,7 @@ qa_stress_val = insights.get("qa_decay", 0.0)
 if transcript_only or not enriched_segments:
     mode_badge, mode_src = "TRANSCRIPT", "Alpha Vantage"
 else:
-    src        = "EarningsCallBiz" if audio_result and "cache/" in audio_result else "YouTube"
+    src        = "EarningsCallBiz" if audio_result and "cache" in audio_result else "YouTube"
     mode_badge = "MULTIMODAL"
     mode_src   = f"{src} + Whisper | {call_duration_min:.0f} min"
 
@@ -565,8 +586,7 @@ with sig_col:
 with tp_col:
     st.subheader("Key Talking Points")
     if talking_points:
-        sorted_tp = sorted(talking_points, key=lambda x: x["sentiment"], reverse=True)
-        for i, tp in enumerate(sorted_tp, 1):
+        for i, tp in enumerate(talking_points, 1):
             score    = tp["sentiment"]
             time_str = f"{tp['time_min']} min" if tp.get("time_min") is not None else ""
             spk = _speaker_for_time(
@@ -603,7 +623,7 @@ if not timeline_df.empty:
         name="FinBERT Sentiment", mode="lines", line=dict(width=2),
     ))
     if "acoustic_confidence" in timeline_df.columns:
-        proxy_val = timeline_df["acoustic_confidence"].iloc[0]
+        proxy_val = timeline_df["acoustic_confidence"].mean()
         fig.add_hline(y=proxy_val, line_width=1.5, line_dash="dash",
                       annotation_text=f"Wav2Vec2 ({proxy_val:+.2f})",
                       annotation_position="top right")
