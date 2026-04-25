@@ -8,15 +8,14 @@ with cached real call data in the next iteration.
 import pandas as pd
 import streamlit as st
 
-# Signal thresholds — calibrated to the concept paper's NVDA case example
-# (MCI=61, divergence=-0.38) as a reference point.
-SIGNAL_MCI_POSITIVE = 65   # text_mci >= this → "Positive"
-SIGNAL_MCI_WATCH    = 45   # text_mci <= this → "Watch", else "Neutral"
+# Signal thresholds: Low ≤52 | Medium 52–56 | High ≥56
+SIGNAL_MCI_POSITIVE = 56   # text_mci >= this → "Positive"
+SIGNAL_MCI_WATCH    = 52   # text_mci <= this → "Watch", else "Neutral"
 
 MCI_THRESHOLDS = {
-    "High":     (75, 100),
-    "Moderate": (55, 75),
-    "Low":      (0,  55),
+    "High":   (56, 100),  # checked first — 56 resolves to High, not Medium
+    "Medium": (52,  56),  # 52 resolves to Medium, not Low
+    "Low":    (0,   52),
 }
 
 DIVERGENCE_THRESHOLDS = {
@@ -53,13 +52,17 @@ def generate_signal_flags(multimodal_result, hedge_data, prepared_sentiment, qa_
     divergence = multimodal_result.get("tone_text_divergence", 0)
 
     # MCI flags
-    if mci < 55:
+    if mci < 52:
         flags.append({"severity": "high",
-                      "message": f"Management confidence index low at {mci}/100",
+                      "message": f"Management confidence low at {mci}/100",
                       "attribution": "Composite score - full call"})
-    elif mci < 70:
+    elif mci < 56:
         flags.append({"severity": "medium",
                       "message": f"Management confidence moderate at {mci}/100",
+                      "attribution": "Composite score - full call"})
+    else:
+        flags.append({"severity": "low",
+                      "message": f"Management confidence positive at {mci}/100",
                       "attribution": "Composite score - full call"})
 
     # Tone-text divergence flags (scale: ±0.5 after halving raw gap)
