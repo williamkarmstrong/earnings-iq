@@ -10,6 +10,22 @@ a pattern Hajek & Munk (2023) show has predictive value for financial outcomes.
 
 import numpy as np
 import pandas as pd
+import torchaudio
+import sys
+
+# --- EMERGENCY COMPATIBILITY PATCH ---
+# 1. Fix NumPy
+if not hasattr(np, "NaN"):
+    np.NaN = np.nan
+
+# 2. Fix TorchAudio
+if not hasattr(torchaudio, "set_audio_backend"):
+    # This creates the missing function
+    torchaudio.set_audio_backend = lambda x: None
+    # This forces the change into the global system cache
+    sys.modules["torchaudio"] = torchaudio
+# --------------------------------------
+
 import streamlit as st
 
 def compute_text_mci(sentiment_score):

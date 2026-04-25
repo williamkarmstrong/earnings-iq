@@ -27,7 +27,7 @@ import numpy as np
 import yfinance as yf
 import html as _html_lib
 
-from ingestion import fetch_backup_transcript, fetch_audio, fetch_transcript_cached
+from ingestion import fetch_av_transcript, fetch_audio, fetch_transcript
 from event_study import run_event_study, get_sector_sensitivity_df, compute_sector_earnings_sensitivity
 from speech import transcribe_audio, map_speakers, resolve_speaker_names, is_management_speaker
 from nlp import (
@@ -114,28 +114,32 @@ title_map         = {}
 is_demo_cached = False
 demo_mode = False
 demo_json = ""
+
+# 1. Fetch Transcript from Alpha Vantage for Backup and Speaker Mapping
+av_json, av_err = fetch_transcript(ticker, period, year)
+if av_json:
+    av_turns, title_map = parse_av_speakers(av_json)
+else:
+    av_turns = []
+    title_map = {}
+
+# 2. Transcript Only Mode: Check Transcript Exists
 if transcript_only:
-    # --- Transcript-only mode: skip all audio processing ---
-    status.text("Fetching Alpha Vantage transcript")
-    transcript_text, err = fetch_transcript_cached(ticker, period, year)
-    if not transcript_text:
+    if not av_json:
         st.error(f"Could not load transcript: {err}")
         st.stop()
-    st.success("Transcript loaded (transcript-only mode -- audio skipped).")
-    try:
-        av_turns, title_map = parse_av_speakers(transcript_text)
-    except Exception:
-        pass
+
     progress.progress(50)
+    st.success("Transcript loaded (transcript-only mode -- audio skipped).")
+
     audio_features = {
         "confidence_proxy": 0.5,
         "pause_ratio": 0.3,
         "pitch_mean": 150,
         "pitch_std": 30,
     }
-
 else:
-    # --- Try Demo Folder First ---
+    # 3. Demo Mode: Try Load Demo Results and Stop
     demo_dir = f"demo/{ticker}_{year}_{period}"
     demo_json = f"{demo_dir}/results.json"
     demo_mode = os.path.isdir(demo_dir)
@@ -146,6 +150,7 @@ else:
         try:
             with open(demo_json, "r", encoding="utf-8") as f:
                 data = json.load(f)
+
             enriched_segments = data.get("enriched_segments", [])
             audio_features = data.get("audio_features", {})
             transcript_text = data.get("transcript_text", "")
@@ -155,6 +160,7 @@ else:
             nsi_cached = data.get("nsi", {})
             peer_data_cached = data.get("peer_data", [])
             es_result_cached = data.get("es_result", {})
+
             if "ar_series" in es_result_cached and isinstance(es_result_cached["ar_series"], list):
                 es_result_cached["ar_series"] = pd.DataFrame(es_result_cached["ar_series"])
             
@@ -164,66 +170,41 @@ else:
         except Exception as e:
             st.error(f"Failed to load demo cache: {e}")
             st.stop()
+
     else:
-        # --- Audio mode ---
+        # 4. Audio Mode: Fetch Audio and Run Specifics
         status.text(f"Fetching audio for {ticker} {period} {year}...")
         audio_path, audio_result = fetch_audio(ticker, period, year)
         progress.progress(15)
 
         if audio_path:
-            try:
-                status.text("Transcribing with Whisper (cached after first run)...")
-                transcription = transcribe_audio(audio_path)
-                progress.progress(35)
-            except Exception as e:
-                pipeline_warnings.append(f"Whisper failed: {e}")
-                transcription = {"segments": [], "text": ""}
-
-            try:
-                status.text("Speaker diarization...")
-                mapped_segments = map_speakers(audio_path, transcription)
-                # Resolve SPEAKER_XX -> real names using AV transcript if available
-                try:
-                    av_text, _ = fetch_transcript_cached(ticker, period, year)
-                    if av_text:
-                        transcript_text = av_text
-                        av_turns, title_map = parse_av_speakers(av_text)
-                        mapped_segments = resolve_speaker_names(mapped_segments, av_turns, title_map)
-                except Exception:
-                    pass
-                progress.progress(50)
-            except Exception as e:
-                pipeline_warnings.append(f"Diarization failed: {e}")
-                mapped_segments = transcription.get("segments", [])
-
-            try:
-                status.text("FinBERT sentiment (batched)...")
-                enriched_segments = analyse_segments(mapped_segments)
-                progress.progress(60)
-            except Exception as e:
-                pipeline_warnings.append(f"Sentiment failed: {e}")
-                enriched_segments = []
-
-            try:
-                status.text("Audio features (cached after first run)...")
-                audio_features = extract_audio_features(audio_path)
-                progress.progress(75)
-            except Exception as e:
-                pipeline_warnings.append(f"Audio features failed: {e}")
-                audio_features = {}
-                
-
+            # A. TRANSCRIPTION
+            status.text("Transcribing with Whisper...")
+            transcription = transcribe_audio(audio_path)
+            progress.progress(35)
+        
+            # B. DIARIZATION & NAME RESOLUTION
+            status.text("Speaker diarization...")
+            mapped_segments = map_speakers(audio_path, transcription)
+            enriched_segments = resolve_speaker_names(mapped_segments, av_turns, title_map)
+            progress.progress(50)
+            
+            # C. SENTIMENT & FEATURES
+            status.text("FinBERT sentiment (batched)...")
+            enriched_segments = analyse_segments(enriched_segments)
+            progress.progress(60)
+            status.text("Audio features (cached after first run)...")
+            audio_features = extract_audio_features(audio_path)
+            progress.progress(75)
         else:
-            st.warning(f"{audio_result} -- falling back to Alpha Vantage transcript.")
-            try:
-                transcript_text, err = fetch_transcript_cached(ticker, period, year)
-                if not transcript_text:
-                    st.error(f"Could not retrieve transcript: {err}")
-                    st.stop()
-                st.success("Alpha Vantage transcript retrieved.")
-            except Exception as e:
-                st.error(f"Transcript fetch failed: {e}")
+            st.warning(f"Failed to fetch audio for {ticker} {period} {year}.")
+            status.text("Defaulting to transcript-only mode.")
+
+            if not av_text:
+                st.error(f"Could not retrieve transcript: {err}")
                 st.stop()
+
+            transcript_only = True
             audio_features = {
                 "confidence_proxy": 0.5,
                 "pause_ratio": 0.3,
@@ -231,8 +212,8 @@ else:
                 "pitch_std": 30,
             }
             progress.progress(50)
-
-# Clip coverage
+            
+# 5. Continue Running Rest of Pipeline
 if enriched_segments:
     call_duration_min = max(s.get("end", 0) for s in enriched_segments) / 60
     is_full_call = call_duration_min >= 25
@@ -831,11 +812,11 @@ with _es_col:
         _ar_df = es_result["ar_series"]
         _sig   = abs(_tstat) >= 1.96
 
-        _ek1, _ek2, _ek3, _ek4 = st.columns(4)
+        _ek1, _ek2, _ek3, _ek4 = st.columns([1, 1.2, 1, 0.9])
         _sens = "High" if _beta > 0.7 else "Medium" if _beta > 0.3 else "Low"
-        _ek1.metric("Market Beta (β)", f"{_beta:.2f}", help=f"General market sensitivity vs SPY · {_sens} · from estimation window")
-        _ek2.metric("CAR [−1,+3]", f"{_car:+.2%}", help="Cumulative abnormal return")
-        _ek3.metric("T-Statistic", f"{_tstat:+.2f}",
+        _ek1.metric("Market Beta", f"{_beta:.2f}", help=f"General Market Sensitivity vs SPY · {_sens}")
+        _ek2.metric("CAR [-1,+3]", f"{_car:+.2%}", help="Cumulative Abnormal Return")
+        _ek3.metric("T-Stat", f"{_tstat:+.2f}",
                     help="Significant (95%)" if _sig else "Not significant")
         _ek4.metric("Model R²", f"{_rsq:.2f}",
                     help=f"{_n_est} est. days · t=0: {_edate}")

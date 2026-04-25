@@ -244,48 +244,31 @@ def analyse_transcript_text(transcript_text):
     }
 
 
-def parse_av_speakers(transcript_text):
+def parse_av_speakers(av_transcript):
     """
-    Extract speaker-attributed turns from an Alpha Vantage transcript.
-    AV format: lines beginning with "Speaker Name: dialogue..."
-    Also attempts to extract titles (CEO, CFO etc.) from introduction lines.
-    Returns:
-      - turns: list of {name, text} in order
-      - title_map: dict of {name: title} where title was found
+    Takes the JSON list from fetch_transcript_cached and 
+    splits it into the two structures needed for resolution.
     """
-    import re
-
-    # Match "Name: text" -- name is 2-50 chars, starts with capital, no digits
-    turn_re = re.compile(
-        r'^([A-Z][A-Za-z\s\.\-]{1,48}):\s+(.+?)(?=\n[A-Z][A-Za-z\s\.\-]{1,48}:|\Z)',
-        re.MULTILINE | re.DOTALL,
-    )
-
-    # Title patterns in intro lines e.g. "Tim Cook, Chief Executive Officer"
-    title_re = re.compile(
-        r'([A-Z][A-Za-z\s\.]{2,40}),\s*(Chief Executive Officer|CEO|Chief Financial Officer|CFO|'
-        r'Chief Operating Officer|COO|President|Analyst|Operator|Investor Relations)',
-        re.IGNORECASE,
-    )
-
-    turns = []
-    for m in turn_re.finditer(transcript_text):
-        name = m.group(1).strip()
-        text = m.group(2).strip().replace('\n', ' ')
-        if len(text) > 8 and not any(d.isdigit() for d in name):
-            turns.append({"name": name, "text": text})
-
+    av_turns = []
     title_map = {}
-    for m in title_re.finditer(transcript_text):
-        name  = m.group(1).strip()
-        title = m.group(2).strip()
-        # Normalise common variants
-        title = title.replace("Chief Executive Officer", "CEO").replace(
-                              "Chief Financial Officer", "CFO").replace(
-                              "Chief Operating Officer", "COO")
-        title_map[name] = title
 
-    return turns, title_map
+    for item in av_transcript:
+        name = item.get("speaker", "Unknown")
+        title = item.get("title", "")
+        content = item.get("content", "")
+
+        if name:
+            # Populate the title map
+            if title:
+                title_map[name] = title
+            
+            # Populate the turns for word-overlap matching
+            av_turns.append({
+                "name": name, 
+                "text": content
+            })
+
+    return av_turns, title_map
 
 
 def compute_nsi(current_stats, historical_stats):
@@ -367,67 +350,55 @@ _QA_TRANSITION_PHRASES = [
 
 def find_qa_start_time(segments):
     """
-    Multi-strategy Q&A start detection. Returns time in seconds, or None.
-
-    All strategies enforce a 10-minute minimum (600s) — Q&A never starts
-    in the opening remarks, so any signal before that is an intro mention
-    (e.g. "This call will include a Q&A session") and must be ignored.
-
-    Strategy 1 — Operator phrase, exact:
-        Operator segment containing a transition phrase → use segment END
-        (Q&A begins after the operator finishes their announcement).
-
-    Strategy 2 — Any segment phrase, interpolated:
-        Find the character position of the phrase within the segment text
-        and linearly interpolate to get the exact second rather than the
-        segment boundary (Whisper segments span 5-20s each).
-
-    Strategy 3 — First confirmed analyst speaker (non-operator):
-        First resolved non-management, non-operator speaker segment after
-        the 10-min mark. Excludes UNKNOWN and SPEAKER_XX labels.
-
-    Strategy 4 — Returns None; caller falls back to 65% heuristic.
+    Q&A Detection Logic:
+    1. Priority: First Resolved Analyst (post 10-min mark).
+    2. Secondary: Operator Transition Phrases (interpolated).
+    3. Fallback: None (Caller defaults to 65% heuristic).
     """
-    from speech import is_management_speaker as _is_mgmt
+    from app.speech import is_management_speaker as _is_mgmt
 
-    _OPERATOR_LABELS = {"operator", "moderator", "conference", "coordinator"}
-    _MIN_QA_SECONDS  = 600   # Q&A cannot start before 10 min
+    _OPERATOR_LABEL = "operator"
+    _MIN_QA_SECONDS  = 600  # 10 Minutes
 
-    # Strategies 1 & 2: phrase-based with within-segment interpolation
-    for seg in segments:
-        seg_start = float(seg.get("start", 0))
-        if seg_start < _MIN_QA_SECONDS:
-            continue  # skip — this is an intro mention, not the actual transition
+    # PRE-SORT: Ensure we are checking chronologically
+    sorted_segs = sorted(segments, key=lambda x: x.get("start", 0))
 
-        text       = seg.get("text", "")
-        text_lower = text.lower()
-        seg_end    = float(seg.get("end", seg_start + 10))
-        speaker    = seg.get("speaker", "").lower()
+    # --- STRATEGY 1: THE ANALYST TRIGGER (HIGHEST CONFIDENCE) ---
+    # We look for the first person who is NOT Management, NOT an Operator,
+    # and NOT an unresolved 'SPEAKER_XX' label.
+    for seg in sorted_segs:
+        start = float(seg.get("start", 0))
+        if start < _MIN_QA_SECONDS:
+            continue
+            
+        speaker = seg.get("speaker", "")
+        # is_management_speaker returns False specifically for Analysts
+        if _is_mgmt(speaker) is False:
+            # Final check to ensure it's not the Operator/Moderator
+            if not any(lbl in speaker.lower() for lbl in _OPERATOR_LABELS):
+                return start
 
+    # --- STRATEGY 2: PHRASE-BASED INTERPOLATION (BACKUP) ---
+    for seg in sorted_segs:
+        start = float(seg.get("start", 0))
+        if start < _MIN_QA_SECONDS:
+            continue
+
+        text_lower = seg.get("text", "").lower()
+        end = float(seg.get("end", start + 10))
+        
         for phrase in _QA_TRANSITION_PHRASES:
             if phrase in text_lower:
-                is_operator = any(lbl in speaker for lbl in _OPERATOR_LABELS)
-                if is_operator:
-                    return seg_end   # Q&A begins after operator finishes
+                # If Operator says it, QA starts AFTER the segment
+                if any(lbl in seg.get("speaker", "").lower() for lbl in _OPERATOR_LABELS):
+                    return end
+                
+                # If Management says it, interpolate the exact second
                 phrase_pos = text_lower.find(phrase)
-                frac = phrase_pos / max(len(text), 1)
-                return round(seg_start + frac * (seg_end - seg_start), 2)
+                frac = phrase_pos / max(len(text_lower), 1)
+                return round(start + frac * (end - start), 2)
 
-    # Strategy 3: first confirmed analyst speaker (not operator, not unresolved)
-    for seg in segments:
-        seg_start = float(seg.get("start", 0))
-        if seg_start < _MIN_QA_SECONDS:
-            continue
-        spk = seg.get("speaker", "")
-        spk_lower = spk.lower()
-        if (spk
-                and spk not in ("UNKNOWN", "")
-                and not spk_lower.startswith("speaker_")
-                and not any(lbl in spk_lower for lbl in _OPERATOR_LABELS)
-                and _is_mgmt(spk) is False):
-            return seg_start
-
-    return None
+    return None # Pipeline will apply 65% heuristic
 
 
 def split_prepared_vs_qa(segments, search_segments=None):
