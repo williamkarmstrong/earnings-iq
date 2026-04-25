@@ -116,12 +116,18 @@ demo_mode = False
 demo_json = ""
 
 # 1. Fetch Transcript from Alpha Vantage for Backup and Speaker Mapping
-av_json, av_err = fetch_transcript(ticker, period, year)
-if av_json:
-    av_turns, title_map = parse_av_speakers(av_json)
+# Skip in audio mode when a demo cache exists — av_turns/title_map come from cache instead.
+_demo_dir = f"demo/{ticker}_{year}_{period}"
+_demo_cache_exists = not transcript_only and os.path.isdir(_demo_dir) and os.path.exists(f"{_demo_dir}/results.json")
+if not _demo_cache_exists:
+    av_json, av_err = fetch_transcript(ticker, period, year)
+    if av_json:
+        av_turns, title_map = parse_av_speakers(av_json)
+    else:
+        av_turns = []
+        title_map = {}
 else:
-    av_turns = []
-    title_map = {}
+    av_json, av_err = None, None
 
 # 2. Transcript Only Mode: Check Transcript Exists
 if transcript_only:
@@ -140,10 +146,10 @@ if transcript_only:
     }
 else:
     # 3. Demo Mode: Try Load Demo Results and Stop
-    demo_dir = f"demo/{ticker}_{year}_{period}"
+    demo_dir = _demo_dir
     demo_json = f"{demo_dir}/results.json"
     demo_mode = os.path.isdir(demo_dir)
-    is_demo_cached = demo_mode and os.path.exists(demo_json)
+    is_demo_cached = _demo_cache_exists
 
     if is_demo_cached:
         status.text("Loading fully processed results from demo cache...")
@@ -161,9 +167,6 @@ else:
             peer_data_cached = data.get("peer_data", [])
             es_result_cached = data.get("es_result", {})
 
-            if "ar_series" in es_result_cached and isinstance(es_result_cached["ar_series"], list):
-                es_result_cached["ar_series"] = pd.DataFrame(es_result_cached["ar_series"])
-            
             audio_result = f"{demo_dir} cache"
             audio_path = f"{demo_dir}/audio.mp3"
             progress.progress(80)
@@ -200,7 +203,7 @@ else:
             st.warning(f"Failed to fetch audio for {ticker} {period} {year}.")
             status.text("Defaulting to transcript-only mode.")
 
-            if not av_text:
+            if not av_json:
                 st.error(f"Could not retrieve transcript: {av_err}")
                 st.stop()
 
@@ -297,7 +300,7 @@ except Exception:
     keywords = []
 
 # If offline demo data is cached, bypass all remaining API calls
-if is_demo_cached and qoq_data_cached and nsi_cached:
+if is_demo_cached:
     qoq_data = qoq_data_cached
     nsi = nsi_cached
     insights["peer_data"] = pd.DataFrame(peer_data_cached)
