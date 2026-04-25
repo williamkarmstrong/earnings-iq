@@ -173,9 +173,26 @@ def resolve_speaker_names(diarized_segments, av_turns, title_map=None):
         if not votes:
             label_to_name[label] = label
             continue
-        
+
         winner_name = votes.most_common(1)[0][0]
         label_to_name[label] = _with_title(winner_name)
+
+    # 5. Fallback: direct per-segment name matching when pyannote was unavailable.
+    # label_votes is empty when all segments had no pyannote speaker label (UNKNOWN).
+    # Try to match each segment's text directly against AV turns by word-overlap so
+    # the speaker attribution panel is not silently empty when diarization is skipped.
+    if not label_votes:
+        result = []
+        for seg in diarized_segments:
+            seg_words = _norm_words(seg.get("text", ""))
+            if len(seg_words) >= 2:
+                is_early = seg.get("start", 0) < 180
+                name = _best_match(seg_words, is_early_segment=is_early)
+                if name:
+                    result.append({**seg, "speaker": _with_title(name)})
+                    continue
+            result.append({**seg, "speaker": seg.get("speaker", "UNKNOWN")})
+        return result
 
     return [
         {**seg, "speaker": label_to_name.get(seg.get("speaker", "UNKNOWN"), seg.get("speaker", "UNKNOWN"))}
@@ -184,24 +201,24 @@ def resolve_speaker_names(diarized_segments, av_turns, title_map=None):
 
 def is_management_speaker(name):
     """
-    Returns True for Management, False for Analysts/Operators.
+    Returns True for confirmed management, False for confirmed analysts/operators,
+    None for unresolved or ambiguous speakers (no title information).
     """
-    if not name or "(" not in name:
-        return False
-    
-    # Extract the string inside the parentheses
+    if not name or name in ("UNKNOWN", "") or name.upper().startswith("SPEAKER_"):
+        return None  # unresolved pyannote label — ambiguous
+    if "(" not in name:
+        return None  # resolved name but no title — ambiguous, don't exclude
+
     title = name.split("(")[-1].split(")")[0].lower()
-    
-    # Check for analyst or operator exclusions
+
     if "analyst" in title or "operator" in title:
         return False
-        
-    # Check for executive markers (CEO, CFO, VP, Director, etc.)
-    exec_markers = ["ceo", "cfo", "vp", "president", "director", "chairman", "management"]
+
+    exec_markers = ["ceo", "cfo", "coo", "vp", "president", "director", "chairman", "officer", "management"]
     if any(m in title for m in exec_markers):
         return True
-        
-    return False
+
+    return None  # title present but unrecognised — ambiguous
 
 @st.cache_data(show_spinner=False)
 def tokenize_audio_text(text):
