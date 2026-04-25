@@ -11,7 +11,7 @@ import numpy as np
 import streamlit as st
 from speech import is_management_speaker
 
-@st.cache_resource(show_spinner="Loading FinBERT sentiment model…")
+@st.cache_resource(show_spinner=False)
 def _load_finbert():
     """Load FinBERT once per server session via st.cache_resource."""
     try:
