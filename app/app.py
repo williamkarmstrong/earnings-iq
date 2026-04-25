@@ -463,7 +463,6 @@ def _key_takeaways(flags, nsi, overall_sentiment, hedge_val):
     if not items:
         items.append(("low", "No high-priority signals. Tone broadly consistent with text."))
     return items[:3]
-
 # ============================================================
 # DASHBOARD
 # ============================================================
@@ -474,7 +473,7 @@ def _key_takeaways(flags, nsi, overall_sentiment, hedge_val):
 mci_val       = insights["mci"]
 div_val       = insights["tone_text_divergence"]
 hedge_val     = insights["hedge_frequency"]
-nsi_sigma     = nsi.get("nsi_sigma", 0.0)
+nsi_sigma     = nsi.get("nsi_sigma", 0.0)   
 nsi_n         = nsi.get("n_quarters", 0)
 timeline_df   = insights["timeline"]
 qa_stress_val = insights.get("qa_decay", 0.0)
@@ -634,7 +633,8 @@ with ki1:
     st.markdown("**Management Highlights**")
     if key_insights["highlights"]:
         for h in key_insights["highlights"]:
-            spk = h.get("speaker", "") or _speaker_for_time(
+            _raw = h.get("speaker", "")
+            spk = _raw if _raw not in ("", "UNKNOWN") else _speaker_for_time(
                 management_segments, h["time_min"], fallback_turns=av_turns, text=h["text"])
             st.success(h["text"])
             meta = " · ".join(x for x in [spk, f'{h["score"]:+.2f}', f'{h["time_min"]} min'] if x)
@@ -646,7 +646,8 @@ with ki2:
     st.markdown("**Risk Signals**")
     if key_insights["risk_signals"]:
         for r in key_insights["risk_signals"]:
-            spk = r.get("speaker", "") or _speaker_for_time(
+            _raw = r.get("speaker", "")
+            spk = _raw if _raw not in ("", "UNKNOWN") else _speaker_for_time(
                 management_segments, r["time_min"], fallback_turns=av_turns, text=r["text"])
             st.error(r["text"])
             meta = " · ".join(x for x in [spk, f'{r["score"]:+.2f}', f'{r["time_min"]} min'] if x)

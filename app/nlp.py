@@ -9,6 +9,7 @@ from transformers import pipeline
 import spacy
 import numpy as np
 import streamlit as st
+from speech import is_management_speaker
 
 @st.cache_resource(show_spinner="Loading FinBERT sentiment model…")
 def _load_finbert():
@@ -355,8 +356,6 @@ def find_qa_start_time(segments):
     2. Secondary: Operator Transition Phrases (interpolated).
     3. Fallback: None (Caller defaults to 65% heuristic).
     """
-    from app.speech import is_management_speaker as _is_mgmt
-
     _OPERATOR_LABEL = "operator"
     _MIN_QA_SECONDS  = 600  # 10 Minutes
 
@@ -373,9 +372,9 @@ def find_qa_start_time(segments):
             
         speaker = seg.get("speaker", "")
         # is_management_speaker returns False specifically for Analysts
-        if _is_mgmt(speaker) is False:
+        if is_management_speaker(speaker) is False:
             # Final check to ensure it's not the Operator/Moderator
-            if not any(lbl in speaker.lower() for lbl in _OPERATOR_LABELS):
+            if not any(lbl in speaker.lower() for lbl in _OPERATOR_LABEL):
                 return start
 
     # --- STRATEGY 2: PHRASE-BASED INTERPOLATION (BACKUP) ---
@@ -390,7 +389,7 @@ def find_qa_start_time(segments):
         for phrase in _QA_TRANSITION_PHRASES:
             if phrase in text_lower:
                 # If Operator says it, QA starts AFTER the segment
-                if any(lbl in seg.get("speaker", "").lower() for lbl in _OPERATOR_LABELS):
+                if any(lbl in seg.get("speaker", "").lower() for lbl in _OPERATOR_LABEL):
                     return end
                 
                 # If Management says it, interpolate the exact second
