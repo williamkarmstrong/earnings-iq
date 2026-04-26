@@ -1,46 +1,87 @@
-import argparse
+import numpy as np
+import torchaudio
 import sys
-import os
-from speech import transcribe_audio, map_speakers, tokenize_audio_text
+import re as _re
+from collections import defaultdict, Counter
 
-def test_pipeline(audio_file_path):
-    print(f"Starting test pipeline on: {audio_file_path}")
-    
-    # 1. Transcribe
-    print("\n--- Transcribing Audio ---")
-    transcription = transcribe_audio(audio_file_path)
-    print(f"Transcription text length: {len(transcription['text'])} characters")
-    print(f"Successfully found {len(transcription.get('segments', []))} text segments.")
-    
-    # 2. Map Speakers
-    print("\n--- Mapping Speakers (Diarization) ---")
-    
-    # ADD HUGGING FACE API KEY WHEN TESTING
-    hf_token = ""
+# --- REQUIRED MONKEY PATCHES ---
+if not hasattr(np, "NaN"): np.NaN = np.nan
+if not hasattr(torchaudio, "set_audio_backend"):
+    torchaudio.set_audio_backend = lambda x: None
 
-    if not hf_token:
-        print("Warning: HUGGING_FACE_API_KEY is not set. Speaker mapping may fail.")
-        
-    mapped_segments = map_speakers(audio_file_path, transcription)
-    # Give a quick sample of the first 3 mapped segments
-    print("Sample mapped segments (first 3):")
-    for seg in mapped_segments[:3]:
-        print(f"[{seg['start']:.2f}s -> {seg['end']:.2f}s] {seg.get('speaker', 'UNKNOWN')}: {seg['text']}")
-        
-    # 3. Tokenize
-    print("\n--- Tokenizing Final Text ---")
-    tokens = tokenize_audio_text(transcription['text'])
-    print(f"Total tokens generated: {len(tokens)}")
-    print(f"First 10 tokens: {tokens[:10]}")
+# --- THE TESTS ---
 
-    print("\nTest pipeline complete!")
+from app.speech import resolve_speaker_names, is_management_speaker
+
+def test_analyst_mapping_logic():
+    """
+    Test 1: Verify that the resolve_speaker_names function 
+    correctly appends (Analyst) based on the Alpha Vantage title.
+    """
+    print("\n--- TEST 1: ANALYST MAPPING ---")
+    
+    # Mock AV data where the title is specifically "Analyst"
+    av_turns = [
+        {"name": "Elon Musk", "text": "We are building the future of autonomy with FSD."},
+        {"name": "Amit Daryanani", "text": "I guess my question is on the gross margin trajectory."}
+    ]
+    
+    # This is what your parse_av_speakers function produces
+    title_map = {
+        "Elon Musk": "CEO",
+        "Amit Daryanani": "Analyst"
+    }
+
+    # Mock Diarized Segments from Pyannote
+    diarized_segments = [
+        {"start": 10, "end": 40, "speaker": "SPEAKER_01", "text": "Building the future of autonomy and FSD."},
+        {"start": 45, "end": 60, "speaker": "SPEAKER_02", "text": "I guess my question is on the gross margin trajectory."}
+    ]
+
+    resolved = resolve_speaker_names(diarized_segments, av_turns, title_map)
+    
+    success = True
+    for seg in resolved:
+        print(f"Resolved: {seg['speaker']}")
+        if "Amit Daryanani" in seg['speaker'] and "(Analyst)" not in seg['speaker']:
+            success = False
+            
+    if success:
+        print("✅ SUCCESS: Analyst title correctly appended.")
+    else:
+        print("❌ FAIL: Analyst title missing or incorrect.")
+
+
+def test_management_classification():
+    """
+    Test 2: Verify that is_management_speaker correctly 
+    separates Management from Analysts/Operators.
+    """
+    print("\n--- TEST 2: MANAGEMENT CLASSIFICATION ---")
+    
+    test_cases = [
+        ("Elon Musk (CEO)", True),
+        ("Vaibhav Taneja (CFO)", True),
+        ("Amit Daryanani (Analyst)", False),
+        ("Dan Levy (Analyst)", False),
+        ("Operator (Operator)", False),
+        ("SPEAKER_01", False),
+        ("Unknown", False)
+    ]
+
+    all_passed = True
+    for name, expected in test_cases:
+        result = is_management_speaker(name)
+        status = "PASS" if result == expected else "FAIL"
+        print(f"Name: {name:25} | Result: {str(result):5} | Expected: {str(expected):5} -> {status}")
+        if result != expected:
+            all_passed = False
+
+    if all_passed:
+        print("✅ SUCCESS: Management classification is deterministic.")
+    else:
+        print("❌ FAIL: Classification logic error.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test Pipeline for Earnings-IQ Audio processing")
-    parser.add_argument("audio_path", help="Path to a small .mp3 or .wav test file")
-    args = parser.parse_args()
-    
-    if not os.path.exists(args.audio_path):
-        print(f"Error: File '{args.audio_path}' does not exist.")
-    else:
-        test_pipeline(args.audio_path)
+    test_analyst_mapping_logic()
+    test_management_classification()

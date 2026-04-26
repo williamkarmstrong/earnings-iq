@@ -2,7 +2,7 @@ import streamlit as st
 import yfinance as yf
 import html as _html_lib
 import re
-from ingestion import fetch_transcript_cached, fetch_backup_transcript
+from ingestion import fetch_transcript
 from nlp import analyse_transcript_text, compute_text_qa_stress
 from insights import SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
 
@@ -10,22 +10,27 @@ from insights import SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
 def _analyse_peer(peer_ticker, period, year):
     """
     Fetch and analyse a peer company's transcript for the given quarter.
-    Returns dict with mci, qa_stress, signal — or None on failure.
+    Returns dict with mci, qa_stress, signal, failure_reason — or None on failure.
     Cached 24h so repeat runs use local cache, not API credits.
     """
     try:
-        text, err = fetch_transcript_cached(peer_ticker, period, year)
-        if not text:
-            text, err = fetch_backup_transcript(peer_ticker, period, year)
-        if not text:
-            return None
-        stats    = analyse_transcript_text(text)
-        text_mci = round(((stats["sentiment"] + 1) / 2) * 100, 1)
-        qa_stress = compute_text_qa_stress(text)
-        signal   = "Positive" if text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if text_mci <= SIGNAL_MCI_WATCH else "Neutral"
+        turns, err = fetch_transcript(peer_ticker, period, year)
+        if not turns:
+            reason = "rate_limited" if err and str(err).startswith("rate_limited:") else "no_transcript"
+            return {"failure_reason": reason}
+        if not isinstance(turns, list) or not turns:
+            return {"failure_reason": "empty_transcript"}
+        # AV transcripts use "content"; legacy .txt cache uses "text"
+        text = " ".join(t.get("content", t.get("text", "")) for t in turns if isinstance(t, dict))
+        if not text.strip():
+            return {"failure_reason": "empty_transcript"}
+        stats     = analyse_transcript_text(text)
+        text_mci  = round(((stats["sentiment"] + 1) / 2) * 100, 1)
+        qa_stress = compute_text_qa_stress(turns)
+        signal    = "Positive" if text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if text_mci <= SIGNAL_MCI_WATCH else "Neutral"
         return {"mci": text_mci, "qa_stress": qa_stress, "signal": signal}
     except Exception:
-        return None
+        return {"failure_reason": "error"}
 
 @st.cache_data
 def is_valid_ticker(ticker):

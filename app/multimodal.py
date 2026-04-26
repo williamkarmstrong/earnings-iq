@@ -8,8 +8,33 @@ it signals that management delivery does not match their words —
 a pattern Hajek & Munk (2023) show has predictive value for financial outcomes.
 """
 
+import sys
+import dataclasses
 import numpy as np
 import pandas as pd
+import torchaudio
+
+# Compatibility patches
+if not hasattr(np, "NaN"):
+    np.NaN = np.nan
+
+if not hasattr(torchaudio, "set_audio_backend"):
+    torchaudio.set_audio_backend = lambda x: None
+if not hasattr(torchaudio, "list_audio_backends"):
+    torchaudio.list_audio_backends = lambda: ["soundfile"]
+if not hasattr(torchaudio, "AudioMetaData"):
+    @dataclasses.dataclass
+    class _AudioMetaData:
+        sample_rate: int
+        num_frames: int
+        num_channels: int
+        bits_per_sample: int
+        encoding: str
+    torchaudio.AudioMetaData = _AudioMetaData
+
+sys.modules["torchaudio"] = torchaudio
+# --------------------------------------
+
 import streamlit as st
 
 def compute_text_mci(sentiment_score):

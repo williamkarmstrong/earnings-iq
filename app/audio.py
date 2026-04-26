@@ -17,7 +17,7 @@ import streamlit as st
 from transformers import Wav2Vec2Processor, Wav2Vec2Model
 
 
-@st.cache_resource(show_spinner="Loading Wav2Vec2 speech model…")
+@st.cache_resource(show_spinner=False)
 def _load_wav2vec2():
     """Load Wav2Vec2 once per server session via st.cache_resource."""
     try:

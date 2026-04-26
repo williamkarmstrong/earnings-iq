@@ -6,17 +6,43 @@ Handles converting audio into text and identifying speakers.
 Output: clean transcript + speaker segments
 """
 
+import sys
+import dataclasses
+import numpy as np
+import torchaudio
+
+# Compatibility patches must run before pyannote is imported
+if not hasattr(np, "NaN"):
+    np.NaN = np.nan
+if not hasattr(np, "float"):
+    np.float = float
+if not hasattr(np, "int"):
+    np.int = int
+
+if not hasattr(torchaudio, "set_audio_backend"):
+    torchaudio.set_audio_backend = lambda backend: None
+if not hasattr(torchaudio, "list_audio_backends"):
+    torchaudio.list_audio_backends = lambda: ["soundfile"]
+if not hasattr(torchaudio, "AudioMetaData"):
+    @dataclasses.dataclass
+    class _AudioMetaData:
+        sample_rate: int
+        num_frames: int
+        num_channels: int
+        bits_per_sample: int
+        encoding: str
+    torchaudio.AudioMetaData = _AudioMetaData
+
+sys.modules['numpy'] = np
+sys.modules['torchaudio'] = torchaudio
+
 import whisper
 import os
 import torch
 import spacy
 import streamlit as st
-
-# Monkey-patch torchaudio to bypass missing set_audio_backend in newer versions
-import torchaudio
-if not hasattr(torchaudio, "set_audio_backend"):
-    torchaudio.set_audio_backend = lambda x: None
-
+import re as _re
+from collections import defaultdict, Counter
 from pyannote.audio import Pipeline
 
 @st.cache_data(show_spinner=False)
@@ -46,7 +72,7 @@ def map_speakers(audio_path, transcription_result):
     try:
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token
+            token=hf_token
         )
         if torch.backends.mps.is_available():
             pipeline.to(torch.device("mps"))
@@ -84,119 +110,115 @@ def map_speakers(audio_path, transcription_result):
 @st.cache_data(show_spinner=False)
 def resolve_speaker_names(diarized_segments, av_turns, title_map=None):
     """
-    Map speaker labels to real names from an Alpha Vantage transcript.
-    Two modes:
-    - SPEAKER_XX labels (pyannote ran): majority-vote per label across all segments.
-    - UNKNOWN labels (pyannote unavailable/cached): direct per-segment word-overlap match.
-    Appends title (CEO/CFO etc.) when found in title_map.
+    Map speaker labels to names. If the speaker is an analyst, 
+    the title will be simplified to 'Analyst' for easier filtering.
     """
-    from collections import defaultdict, Counter
-
     if not av_turns:
         return diarized_segments
 
-    import re as _re
-
     def _norm_words(text):
-        """Lowercase and strip punctuation from words for robust matching."""
-        return set(_re.sub(r"[^a-z0-9\s]", "", text.lower()).split())
+        stops = {'the', 'and', 'to', 'of', 'a', 'in', 'that', 'is', 'for', 'on', 'with', 'welcome', 'thank'}
+        words = _re.sub(r"[^a-z0-9\s]", "", text.lower()).split()
+        return set(w for w in words if w not in stops)
 
+    # 1. Search Index
     av_word_sets = [
-        {"name": t["name"], "words": _norm_words(t["text"])}
-        for t in av_turns
+        {"name": t["name"], "words": _norm_words(t["text"]), "index": i}
+        for i, t in enumerate(av_turns)
     ]
 
-    def _best_match(seg_words):
+    def _best_match(seg_words, is_early_segment=False):
         best_name, best_overlap = None, 0
         for av in av_word_sets:
             overlap = len(seg_words & av["words"])
+            if is_early_segment and av["index"] < 3:
+                overlap *= 2.5 
             if overlap > best_overlap:
                 best_overlap = overlap
                 best_name = av["name"]
         return best_name if best_overlap >= 2 else None
 
+    # 2. Simplified Title Helper
     def _with_title(name):
         if title_map and name in title_map:
-            return f"{name} ({title_map[name]})"
+            title = title_map[name]
+            # If the title contains 'Analyst', force it to 'Analyst'
+            if "analyst" in title.lower():
+                return f"{name} (Analyst)"
+            # Otherwise, use the executive title (CEO, CFO, etc.)
+            return f"{name} ({title})"
         return name
 
-    all_unknown = all(s.get("speaker", "UNKNOWN") == "UNKNOWN" for s in diarized_segments)
+    # 3. Weighted Voting
+    label_votes = defaultdict(Counter)
+    sorted_segs = sorted(diarized_segments, key=lambda x: x.get("start", 0))
+    
+    for seg in sorted_segs:
+        label = seg.get("speaker", "UNKNOWN")
+        if label == "UNKNOWN": continue
+        
+        seg_words = _norm_words(seg.get("text", ""))
+        if len(seg_words) < 2: continue
+        
+        is_early = seg.get("start", 0) < 180
+        name = _best_match(seg_words, is_early_segment=is_early)
+        
+        if name:
+            weight = max(1, len(seg_words) // 5)
+            label_votes[label][name] += weight
 
-    if all_unknown:
-        # No pyannote labels -- assign names directly per segment via word overlap
+    # 4. Final Mapping
+    label_to_name = {}
+    for label, votes in label_votes.items():
+        if not votes:
+            label_to_name[label] = label
+            continue
+
+        winner_name = votes.most_common(1)[0][0]
+        label_to_name[label] = _with_title(winner_name)
+
+    # 5. Fallback: direct per-segment name matching when pyannote was unavailable.
+    # label_votes is empty when all segments had no pyannote speaker label (UNKNOWN).
+    # Try to match each segment's text directly against AV turns by word-overlap so
+    # the speaker attribution panel is not silently empty when diarization is skipped.
+    if not label_votes:
         result = []
         for seg in diarized_segments:
             seg_words = _norm_words(seg.get("text", ""))
-            name = _best_match(seg_words) if len(seg_words) >= 2 else None
-            result.append({**seg, "speaker": _with_title(name) if name else "UNKNOWN"})
+            if len(seg_words) >= 2:
+                is_early = seg.get("start", 0) < 180
+                name = _best_match(seg_words, is_early_segment=is_early)
+                if name:
+                    result.append({**seg, "speaker": _with_title(name)})
+                    continue
+            result.append({**seg, "speaker": seg.get("speaker", "UNKNOWN")})
         return result
-
-    # SPEAKER_XX mode -- majority vote per label
-    label_votes = defaultdict(Counter)
-    for seg in diarized_segments:
-        label = seg.get("speaker", "UNKNOWN")
-        if label == "UNKNOWN":
-            continue
-        seg_words = _norm_words(seg.get("text", ""))
-        if len(seg_words) < 2:
-            continue
-        name = _best_match(seg_words)
-        if name:
-            label_votes[label][name] += 1
-
-    label_to_name = {}
-    for label, votes in label_votes.items():
-        name = votes.most_common(1)[0][0]
-        label_to_name[label] = _with_title(name)
 
     return [
         {**seg, "speaker": label_to_name.get(seg.get("speaker", "UNKNOWN"), seg.get("speaker", "UNKNOWN"))}
         for seg in diarized_segments
     ]
 
-
-_EXEC_TITLES = {
-    "ceo", "cfo", "coo", "cso", "cto", "cio", "president", "chairman", "chair",
-    "chief", "officer", "director", "founder", "vice president", "vp",
-    "investor relations",
-}
-_ANALYST_MARKERS = {
-    "analyst", "research",
-    "goldman sachs", "morgan stanley", "j.p. morgan", "jpmorgan", "bank of america",
-    "bofa", "barclays", "ubs", "citi", "citigroup", "wells fargo", "credit suisse",
-    "deutsche bank", "raymond james", "oppenheimer", "cowen", "needham", "jefferies",
-    "piper sandler", "baird", "rbc", "td securities", "bernstein", "truist", "mizuho",
-    "bmo", "stifel", "cantor fitzgerald", "macquarie", "keybanc", "evercore",
-    "guggenheim", "rosenblatt",
-}
-_EXCLUDE_LABELS = {"operator", "moderator", "conference", "coordinator"}
-
-
 def is_management_speaker(name):
     """
-    Classify a resolved speaker name as management, analyst/external, or unknown.
-
-    Returns:
-      True  — confirmed management/executive (name contains an exec title)
-      False — confirmed non-management (operator, analyst, or known research firm)
-      None  — ambiguous (plain name with no title, e.g. unresolved SPEAKER_XX)
+    Returns True for confirmed management, False for confirmed analysts/operators,
+    None for unresolved or ambiguous speakers (no title information).
     """
-    if not name or name.upper() == "UNKNOWN":
-        return False
-    lower = name.lower()
-    if lower.startswith("speaker_"):
-        return None  # unresolved pyannote label
-    for marker in _EXCLUDE_LABELS:
-        if marker in lower:
-            return False
-    for marker in _ANALYST_MARKERS:
-        if marker in lower:
-            return False
-    for title in _EXEC_TITLES:
-        if title in lower:
-            return True
-    return None  # resolved name but no title info — ambiguous
+    if not name or name in ("UNKNOWN", "") or name.upper().startswith("SPEAKER_"):
+        return None  # unresolved pyannote label — ambiguous
+    if "(" not in name:
+        return None  # resolved name but no title — ambiguous, don't exclude
 
+    title = name.split("(")[-1].split(")")[0].lower()
+
+    if "analyst" in title or "operator" in title:
+        return False
+
+    exec_markers = ["ceo", "cfo", "coo", "vp", "president", "director", "chairman", "officer", "management"]
+    if any(m in title for m in exec_markers):
+        return True
+
+    return None  # title present but unrecognised — ambiguous
 
 @st.cache_data(show_spinner=False)
 def tokenize_audio_text(text):
