@@ -58,20 +58,20 @@ def _load_window(audio_path, offset_s, duration_s, sr=16000):
     return chunk, sr
 
 
-def _window_offsets(total_s, window_s, n=3):
-    """Return n evenly-spread start offsets that don't exceed total_s."""
-    offsets = [
-        0.0,
-        max(0.0, total_s / 2 - window_s / 2),
-        max(0.0, total_s - window_s),
-    ]
-    return offsets[:n]
+def _sliding_offsets(total_s: float, window_s: float, stride_s: float | None = None) -> list[float]:
+    """Return start offsets for a sliding window that covers the full file."""
+    step = stride_s if stride_s is not None else window_s
+    offsets, off = [], 0.0
+    while off < total_s:
+        offsets.append(off)
+        off += step
+    return offsets
 
 
 def extract_acoustic_features(audio_path):
     """
     Extract interpretable acoustic features using librosa.
-    Loads three short windows (start, middle, end) rather than the full file.
+    Slides 20s pitch windows and 120s energy/pause windows across the full file.
     Returns a dict of scalar features.
     """
     sr        = 16000
@@ -79,9 +79,9 @@ def extract_acoustic_features(audio_path):
     pitch_win = 20.0    # seconds per pitch window
     feat_win  = 120.0   # seconds per energy/pause window
 
-    # ── Pitch (3 × 20s windows) ────────────────────────────────────────────
+    # ── Pitch (non-overlapping 20s windows, full call) ─────────────────────
     valid_f0 = []
-    for off in _window_offsets(total_s, pitch_win):
+    for off in _sliding_offsets(total_s, pitch_win):
         try:
             chunk, _ = _load_window(audio_path, off, pitch_win, sr)
             if len(chunk) < sr:
@@ -98,9 +98,9 @@ def extract_acoustic_features(audio_path):
     pitch_mean = float(np.mean(valid_f0)) if len(valid_f0) > 0 else 0.0
     pitch_std  = float(np.std(valid_f0))  if len(valid_f0) > 0 else 0.0
 
-    # ── Energy, pause ratio, tempo (3 × 120s windows) ──────────────────────
+    # ── Energy, pause ratio, tempo (120s windows, 60s stride, full call) ────
     energy_means, pause_ratios, tempos = [], [], []
-    for off in _window_offsets(total_s, feat_win):
+    for off in _sliding_offsets(total_s, feat_win, stride_s=60.0):
         try:
             chunk, _ = _load_window(audio_path, off, feat_win, sr)
             if len(chunk) < sr:
@@ -128,9 +128,10 @@ def extract_acoustic_features(audio_path):
     }
 
 
-def extract_wav2vec2_features(audio_path, window_s=200.0):
+def extract_wav2vec2_features(audio_path, window_s=200.0, stride_s=100.0):
     """
-    Extract Wav2Vec2 deep speech embeddings from three windows.
+    Extract Wav2Vec2 deep speech embeddings via a sliding window across the full call.
+    50% overlap (stride = window/2 by default) smooths boundary effects on step norms.
     Each window is loaded independently from disk — no full-file load.
     Returns a dict with confidence proxy and raw norm.
     """
@@ -144,7 +145,7 @@ def extract_wav2vec2_features(audio_path, window_s=200.0):
     all_step_norms = []
 
     with torch.no_grad():
-        for off in _window_offsets(total_s, window_s):
+        for off in _sliding_offsets(total_s, window_s, stride_s=stride_s):
             try:
                 chunk, _ = _load_window(audio_path, off, window_s, sr)
                 if len(chunk) < sr:
@@ -165,7 +166,7 @@ def extract_wav2vec2_features(audio_path, window_s=200.0):
 
     step_arr = np.array(all_step_norms)
     cv = float(np.std(step_arr)) / (float(np.mean(step_arr)) + 1e-6)
-    confidence_proxy = float(np.tanh(cv / 0.6))
+    confidence_proxy = float(1.0 - np.tanh(cv / 0.6))
 
     return {
         "embedding_mean":    mean_embedding.tolist(),
