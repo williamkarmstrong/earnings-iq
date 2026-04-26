@@ -306,14 +306,13 @@ def get_earnings_date(ticker, period, year):
     fallback = approx.get(period, date(year, 4, 25))
 
     try:
-        ed = yf.Ticker(ticker).earnings_dates
+        ed = yf.Ticker(ticker).get_earnings_dates()
         if ed is not None and not ed.empty:
-            target = pd.Timestamp(fallback)
             idx = ed.index.tz_localize(None) if ed.index.tz is not None else ed.index
-            diffs = (idx - target).abs()
-            best = int(diffs.argmin())
-            if diffs.iloc[best] <= pd.Timedelta(days=60):
-                return idx[best].date()
+            year_dates = sorted([d for d in idx if d.year == year])
+            q_idx = {"Q1": 0, "Q2": 1, "Q3": 2, "Q4": 3}.get(period)
+            if q_idx is not None and q_idx < len(year_dates):
+                return year_dates[q_idx].date()
     except Exception:
         pass
 

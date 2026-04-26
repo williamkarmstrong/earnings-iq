@@ -575,7 +575,7 @@ with kpi_col:
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("MCI", mci_val, help="Management Confidence Index [0–100]")
     k2.metric("Transcript Sentiment", f"{overall_sentiment:+.2f}", help="FinBERT net score")
-    if transcript_only or not audio_features.get("wav2vec2_raw_norm"):
+    if transcript_only:
         k3.metric("Tone-Text Div.", "N/A", help="Audio required")
     else:
         k3.metric("Tone-Text Div.", f"{div_val:+.2f}", help=insights["divergence_label"])
@@ -604,7 +604,7 @@ st.divider()
 # ================================================================
 sig_col, tp_col = st.columns([1, 1.6])
 
-_has_audio = not transcript_only and bool(audio_features.get("wav2vec2_raw_norm"))
+_has_audio = not transcript_only
 _visible_flags = [
     f for f in insights["flags"]
     if _has_audio or "divergence" not in f.get("message", "").lower()
@@ -819,7 +819,7 @@ with hist_col:
 
 with div_col2:
     st.subheader("Tone-Text Divergence")
-    if transcript_only or not audio_features.get("wav2vec2_raw_norm"):
+    if transcript_only:
         st.info("Audio required for tone-text divergence analysis.")
     else:
         section_div = multimodal_result.get("section_divergence", [])

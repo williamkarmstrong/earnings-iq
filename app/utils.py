@@ -36,8 +36,12 @@ def _analyse_peer(peer_ticker, period, year):
 def is_valid_ticker(ticker):
     """Quick yfinance check to catch typos before running the pipeline."""
     try:
-        hist = yf.Ticker(ticker).history(period="1d")
-        return hist.empty is False
+        t = yf.Ticker(ticker)
+        # fast_info is a lightweight non-historical call; quote_type is None only for unrecognised symbols
+        if t.fast_info.quote_type is not None:
+            return True
+        # Fallback: 5d window avoids false negatives on weekends/holidays
+        return not t.history(period="5d").empty
     except Exception:
         return False
 
