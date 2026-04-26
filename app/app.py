@@ -35,7 +35,7 @@ from nlp import (
 )
 from audio import extract_audio_features
 from multimodal import analyse_multimodal
-from insights import generate_insights, SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
+from insights import generate_insights, get_peer_tickers, SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
 from utils import _analyse_peer, get_previous_quarters, _speaker_from_turns, _speaker_for_time, _key_takeaways, is_valid_ticker
 
 def find_audio_file(ticker: str, period: str, year: int) -> str | None:
@@ -153,6 +153,20 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         else:
             av_turns = []
             title_map = {}
+
+        # Pre-fetch previous quarter transcripts for QoQ now — the Whisper/Librosa
+        # processing below acts as a natural rate-limit gap before peers are fetched.
+        status.text("Pre-fetching historical transcripts...")
+        _prefetch_rate_limited = []
+        for _pf_period, _pf_year in get_previous_quarters(period, year, n=4):
+            _, _pf_err = fetch_transcript(ticker, _pf_period, _pf_year)
+            if _pf_err and str(_pf_err).startswith("rate_limited:"):
+                _prefetch_rate_limited.append(f"{_pf_period} {_pf_year}")
+        if _prefetch_rate_limited:
+            pipeline_warnings.append(
+                f"API rate limit hit pre-fetching QoQ history — these quarters will show N/A: {', '.join(_prefetch_rate_limited)}"
+            )
+        status.empty()
     else:
         av_json, av_err = None, None
 
@@ -379,6 +393,8 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         _live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci <= SIGNAL_MCI_WATCH else "Neutral"
 
         _peer_rows = []
+        _rate_limited_peers = []
+        _no_transcript_peers = []
         for _pt in _peer_tickers:
             if _pt.upper() == ticker.upper():
                 _peer_rows.append({
@@ -390,7 +406,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
                 })
             else:
                 _res = _analyse_peer(_pt, period, year)
-                if _res:
+                if _res and "mci" in _res:
                     _peer_rows.append({
                         "ticker":      _pt.upper(),
                         "mci":         _res["mci"],
@@ -399,6 +415,11 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
                         "is_selected": False,
                     })
                 else:
+                    _reason = (_res or {}).get("failure_reason", "no_transcript")
+                    if _reason == "rate_limited":
+                        _rate_limited_peers.append(_pt.upper())
+                    else:
+                        _no_transcript_peers.append(_pt.upper())
                     _peer_rows.append({
                         "ticker":      _pt.upper(),
                         "mci":         None,
@@ -419,8 +440,12 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
             _peer_avg  = _valid_mci.mean() if not _valid_mci.empty else _live_text_mci
             _peer_df["delta_vs_peers"] = (_peer_df["mci"] - _peer_avg).round(1)
             insights["peer_data"] = _peer_df
+            insights["peer_rate_limited"] = _rate_limited_peers
+            insights["peer_no_transcript"] = _no_transcript_peers
         else:
             insights["peer_data"] = pd.DataFrame()
+            insights["peer_rate_limited"] = []
+            insights["peer_no_transcript"] = []
 
         progress.progress(100)
         status.empty()
@@ -525,7 +550,7 @@ else:
 # ================================================================
 # HEADER
 # ================================================================
-st.title(f"{ticker}  ·  {period} {year} Earnings Call Analysis")
+st.title(f"{ticker}  ·  {period} {year}")
 st.caption(f"{mode_badge}  ·  {mode_src}")
 st.divider()
 
@@ -882,11 +907,18 @@ if not peer_df.empty and "is_selected" in peer_df.columns:
         "qa_stress": "Q&A Stress", "signal": "Signal",
     }).drop(columns=["is_selected"])
     st.dataframe(display_df, use_container_width=True, hide_index=True)
-    st.caption(
-        "MCI = FinBERT text sentiment [0–100] · "
-        "Q&A Stress = sentiment decay in analyst Q&A · "
-        "N/A = transcript not yet cached · ● = selected ticker"
-    )
+    _caption_parts = [
+        "MCI = FinBERT text sentiment [0–100]",
+        "Q&A Stress = sentiment decay in analyst Q&A",
+        "● = selected ticker",
+    ]
+    _rate_lim = insights.get("peer_rate_limited", [])
+    _no_tx    = insights.get("peer_no_transcript", [])
+    if _rate_lim:
+        _caption_parts.append(f"API rate limit hit — retry later for: {', '.join(_rate_lim)}")
+    if _no_tx:
+        _caption_parts.append(f"No AV transcript available for: {', '.join(_no_tx)}")
+    st.caption(" · ".join(_caption_parts))
 else:
     st.info("Peer data unavailable.")
 

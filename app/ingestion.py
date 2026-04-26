@@ -125,7 +125,7 @@ def fetch_av_transcript(ticker, period, year):
     """Fallback: fetch text transcript from Alpha Vantage API or return error message."""
     if not ALPHA_VANTAGE_API_KEY:
         return None, "No Alpha Vantage API key found."
-        
+
     url = f"https://www.alphavantage.co/query?function=EARNINGS_CALL_TRANSCRIPT&symbol={ticker}&quarter={year}{period}&apikey={ALPHA_VANTAGE_API_KEY}"
     try:
         response = requests.get(url)
@@ -133,8 +133,11 @@ def fetch_av_transcript(ticker, period, year):
             data = response.json()
             if "transcript" in data:
                 return data["transcript"], None
-            else:
-                return None, f"Alpha Vantage returned no transcript"
+            # AV returns {"Note": "..."} or {"Information": "..."} on rate limit
+            if "Note" in data or "Information" in data:
+                msg = data.get("Note") or data.get("Information", "")
+                return None, f"rate_limited:{msg}"
+            return None, "no_transcript"
         else:
             return None, f"Alpha Vantage request failed with status code: {response.status_code}"
     except Exception as e:
