@@ -432,36 +432,67 @@ def split_prepared_vs_qa(segments, search_segments=None):
     return prepared, qa
 
 
-def compute_text_qa_stress(text):
+def compute_text_qa_stress(turns):
     """
-    Compute Q&A stress from a plain transcript string (no timestamps).
-    Splits at the first Q&A transition phrase; falls back to 65% position.
-    Returns prepared_sentiment - qa_sentiment (positive = stress in Q&A).
-    Returns 0.0 if the text is too short to split meaningfully.
+    Compute Q&A stress from AV transcript turns (list of dicts with speaker/title/content).
+    Mirrors the three-strategy logic of find_qa_start_time but operates on turn index
+    rather than timestamps, since AV transcripts carry no timing information.
+
+    Strategy 1 (highest confidence): first turn whose title marks an analyst
+    (not management), after skipping the first 20% of turns as a prepared-remarks guard.
+    Strategy 2: first turn whose content contains a QA transition phrase.
+    Fallback: 65% of turns.
+
+    Scores each section by sampling up to 5 evenly spaced turns rather than
+    truncating to the first 1500 chars, avoiding boilerplate-bias.
+    Returns prepared_sentiment - qa_sentiment (positive = decay into Q&A).
     """
-    if not text or len(text) < 500:
+    if not turns or len(turns) < 4:
         return 0.0
 
-    split_pos = None
-    text_lower = text.lower()
-    for phrase in _QA_TRANSITION_PHRASES:
-        idx = text_lower.find(phrase)
-        if idx > 0:
-            split_pos = idx
+    _MGMT_MARKERS = {"ceo", "cfo", "coo", "cto", "vp", "president", "director", "officer", "chairman"}
+    min_turn = max(1, len(turns) // 5)
+    qa_start_idx = None
+
+    # Strategy 1: first analyst turn
+    for i, turn in enumerate(turns):
+        if i < min_turn:
+            continue
+        title = turn.get("title", "").lower()
+        if "analyst" in title and not any(m in title for m in _MGMT_MARKERS):
+            qa_start_idx = i
             break
 
-    if split_pos is None:
-        split_pos = int(len(text) * 0.65)
+    # Strategy 2: transition phrase in content
+    if qa_start_idx is None:
+        for i, turn in enumerate(turns):
+            if i < min_turn:
+                continue
+            content_lower = turn.get("content", "").lower()
+            if any(phrase in content_lower for phrase in _QA_TRANSITION_PHRASES):
+                qa_start_idx = i
+                break
 
-    prepared_text = text[:split_pos].strip()
-    qa_text       = text[split_pos:].strip()
+    # Fallback: 65% of turns
+    if qa_start_idx is None:
+        qa_start_idx = int(len(turns) * 0.65)
 
-    if len(prepared_text) < 200 or len(qa_text) < 200:
+    prepared_turns = turns[:qa_start_idx]
+    qa_turns       = turns[qa_start_idx:]
+
+    if len(prepared_turns) < 2 or len(qa_turns) < 2:
         return 0.0
 
-    prep_sent = analyse_sentiment(prepared_text[:1500])["score"]
-    qa_sent   = analyse_sentiment(qa_text[:1500])["score"]
-    return round(prep_sent - qa_sent, 3)
+    def _score_section(turn_list):
+        texts = [t.get("content", "").strip() for t in turn_list if t.get("content", "").strip()]
+        if not texts:
+            return 0.0
+        step    = max(1, len(texts) // 5)
+        samples = [texts[i] for i in range(0, len(texts), step)][:5]
+        scores  = [_score_text(s) for s in samples]
+        return float(np.mean(scores))
+
+    return round(_score_section(prepared_turns) - _score_section(qa_turns), 3)
 
 
 # Common words to exclude from keyword extraction (financial context aware)
