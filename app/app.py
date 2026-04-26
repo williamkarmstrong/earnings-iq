@@ -38,6 +38,17 @@ from multimodal import analyse_multimodal
 from insights import generate_insights, SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
 from utils import _analyse_peer, get_previous_quarters, _speaker_from_turns, _speaker_for_time, _key_takeaways, is_valid_ticker
 
+def find_audio_file(ticker: str, period: str, year: int) -> str | None:
+    """Return absolute path to a cached audio file for this call, or None."""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base = os.path.join(project_root, "cache", f"{ticker}_{year}_{period}")
+    for ext in ("wav", "webm", "mp3"):
+        path = f"{base}.{ext}"
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 st.set_page_config(page_title="EarningsIQ", layout="wide")
 
 # ============================================================
@@ -64,7 +75,13 @@ with st.sidebar:
     else:
         st.caption("Mode: Audio + Text (default)")
 
-    run = st.button("Analyse Call", use_container_width=True, type="primary")
+    if st.button("Analyse Call", use_container_width=True, type="primary"):
+        st.session_state.analysis_run = True
+        st.session_state.analysis_key = (ticker, period, year, transcript_only)
+        st.session_state.pop("audio_autoplay",  None)
+        st.session_state.pop("audio_seek_time", None)
+    elif st.session_state.get("analysis_key") != (ticker, period, year, transcript_only):
+        st.session_state.pop("analysis_run", None)
     st.divider()
 
     with st.expander("Metrics guide"):
@@ -88,7 +105,7 @@ Low ≤52 · Medium 52–56 · High ≥56
 # ============================================================
 st.title("EarningsIQ - Multimodal Earnings Call Analysis")
 
-if not run:
+if not st.session_state.get("analysis_run", False):
     st.info("Select a ticker and quarter in the sidebar, then click **Analyse Call**.")
     st.stop()
 
@@ -485,6 +502,8 @@ is_full_call        = result["is_full_call"]
 transcript_only     = result["transcript_only"]
 audio_result        = result["audio_result"]
 
+audio_file_path = None if (transcript_only or not enriched_segments) else find_audio_file(ticker, period, year)
+
 # ============================================================
 # DASHBOARD
 # ============================================================
@@ -595,9 +614,22 @@ with tp_col:
                 fallback_turns=av_turns, text=tp.get("text", ""),
             )
             meta = " · ".join(x for x in [time_str, spk] if x)
-            st.markdown(f"**#{i}** `{score:+.3f}` {tp['text']}")
-            if meta:
-                st.caption(meta)
+            _can_play = audio_file_path and tp.get("time_min") is not None
+            if _can_play:
+                _b, _t = st.columns([1, 9])
+                with _b:
+                    if st.button("▶", key=f"tp_play_{i}", help=f"Play from {tp['time_min']} min", use_container_width=True):
+                        st.session_state.audio_seek_time = int(float(tp["time_min"]) * 60)
+                        st.session_state.audio_autoplay  = True
+                        st.rerun()
+                with _t:
+                    st.markdown(f"**#{i}** `{score:+.3f}` {tp['text']}")
+                    if meta:
+                        st.caption(meta)
+            else:
+                st.markdown(f"**#{i}** `{score:+.3f}` {tp['text']}")
+                if meta:
+                    st.caption(meta)
     else:
         st.caption("No talking points available.")
 
@@ -621,7 +653,8 @@ if not timeline_df.empty:
                                 showarrow=True, arrowhead=2, ax=30, ay=0)
     fig.add_trace(go.Scatter(
         x=timeline_df["time_min"], y=timeline_df["sentiment_score"],
-        name="FinBERT Sentiment", mode="lines", line=dict(width=2),
+        name="FinBERT Sentiment", mode="lines+markers",
+        line=dict(width=2), marker=dict(size=5, opacity=0.7),
     ))
     if "acoustic_confidence" in timeline_df.columns:
         proxy_val = timeline_df["acoustic_confidence"].mean()
@@ -632,11 +665,40 @@ if not timeline_df.empty:
     fig.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=0),
                       xaxis_title="Call time (min)", yaxis_title="Sentiment",
                       yaxis_range=[-1, 1])
-    st.plotly_chart(fig, use_container_width=True)
+    _chart_evt = st.plotly_chart(
+        fig, use_container_width=True,
+        on_select="rerun", selection_mode="points", key="sentiment_traj",
+    )
+    if audio_file_path and _chart_evt and _chart_evt.selection and _chart_evt.selection.points:
+        _pt = _chart_evt.selection.points[0]
+        _t  = _pt.get("x") if isinstance(_pt, dict) else getattr(_pt, "x", None)
+        if _t is not None:
+            st.session_state.audio_seek_time = int(float(_t) * 60)
+            st.session_state.audio_autoplay  = True
+
     if not is_full_call:
         st.caption(f"Short clip ({call_duration_min:.0f} min) — Q&A annotation requires ≥ 25 min.")
 else:
     st.info("Sentiment trajectory requires audio mode with Whisper segments.")
+
+st.divider()
+
+# Audio player — placed here so chart event (above) and talking-point reruns
+# both land here with the correct state. Sentiment extremes buttons (below)
+# overwrite the slot directly in the same run without needing a rerun.
+_autoplay = st.session_state.get("audio_autoplay", False)
+st.session_state.audio_autoplay = False  # always consume
+audio_slot    = None
+_audio_fmt    = None
+if audio_file_path:
+    _seek  = st.session_state.get("audio_seek_time", 0)
+    _ext   = os.path.splitext(audio_file_path)[1].lstrip(".")
+    _audio_fmt = {"wav": "audio/wav", "webm": "audio/webm", "mp3": "audio/mpeg"}.get(_ext, "audio/wav")
+    _mm, _ss   = divmod(int(_seek), 60)
+    _cue_lbl   = f"Cued to {_mm}:{_ss:02d}" if _seek > 0 else "Click a chart point or ▶ button to seek"
+    st.caption(f"Earnings call audio · {_cue_lbl}")
+    audio_slot = st.empty()
+    audio_slot.audio(audio_file_path, format=_audio_fmt, start_time=_seek, autoplay=_autoplay)
 
 st.divider()
 
@@ -649,26 +711,44 @@ ki1, ki2 = st.columns(2)
 with ki1:
     st.markdown("**Management Highlights**")
     if key_insights["highlights"]:
-        for h in key_insights["highlights"]:
+        for _hi, h in enumerate(key_insights["highlights"]):
             _raw = h.get("speaker", "")
             spk = _raw if _raw not in ("", "UNKNOWN") else _speaker_for_time(
                 management_segments, h["time_min"], fallback_turns=av_turns, text=h["text"])
             st.success(h["text"])
             meta = " · ".join(x for x in [spk, f'{h["score"]:+.2f}', f'{h["time_min"]} min'] if x)
-            st.caption(meta)
+            _mc, _bc = st.columns([8, 1])
+            with _mc:
+                st.caption(meta)
+            if audio_slot:
+                with _bc:
+                    if st.button("▶", key=f"hi_play_{_hi}", help=f"Play from {h['time_min']} min"):
+                        _s = int(float(h["time_min"]) * 60)
+                        st.session_state.audio_seek_time = _s
+                        audio_slot.audio(audio_file_path, format=_audio_fmt,
+                                         start_time=_s, autoplay=True)
     else:
         st.caption("None detected.")
 
 with ki2:
     st.markdown("**Risk Signals**")
     if key_insights["risk_signals"]:
-        for r in key_insights["risk_signals"]:
+        for _ri, r in enumerate(key_insights["risk_signals"]):
             _raw = r.get("speaker", "")
             spk = _raw if _raw not in ("", "UNKNOWN") else _speaker_for_time(
                 management_segments, r["time_min"], fallback_turns=av_turns, text=r["text"])
             st.error(r["text"])
             meta = " · ".join(x for x in [spk, f'{r["score"]:+.2f}', f'{r["time_min"]} min'] if x)
-            st.caption(meta)
+            _mc, _bc = st.columns([8, 1])
+            with _mc:
+                st.caption(meta)
+            if audio_slot:
+                with _bc:
+                    if st.button("▶", key=f"rs_play_{_ri}", help=f"Play from {r['time_min']} min"):
+                        _s = int(float(r["time_min"]) * 60)
+                        st.session_state.audio_seek_time = _s
+                        audio_slot.audio(audio_file_path, format=_audio_fmt,
+                                         start_time=_s, autoplay=True)
     else:
         st.caption("None detected.")
 
