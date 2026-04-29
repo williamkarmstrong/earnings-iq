@@ -376,7 +376,7 @@ def run_event_study(ticker, period, year):
     """
     event_date = get_earnings_date(ticker, period, year)
 
-    fetch_start = event_date - timedelta(days=185)
+    fetch_start = event_date - timedelta(days=220)
     fetch_end   = event_date + timedelta(days=15)
 
     try:
