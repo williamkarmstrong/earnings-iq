@@ -292,11 +292,51 @@ def compute_sector_earnings_sensitivity():
     return sector_results
 
 
+
+
+# Authoritative earnings call dates verified against company IR / press releases.
+# Override yfinance lookups, which are unreliable for fiscal-year companies
+# (AAPL, MSFT, V, DIS, PG, WMT, CRM) whose Q1 fiscal ≠ Q1 calendar.
+# Key: (TICKER, "QN", calendar_year_of_call) → call date.
+EARNINGS_DATE_OVERRIDES = {
+    ("TSLA",  "Q1", 2024): date(2024,  4, 23),
+    ("XOM",   "Q1", 2024): date(2024,  4, 26),
+    ("JNJ",   "Q1", 2024): date(2024,  4, 16),
+    ("V",     "Q1", 2024): date(2024,  1, 25),  # Q1 FY2024
+    ("AAPL",  "Q1", 2024): date(2024,  2,  1),  # Q1 FY2024
+    ("JPM",   "Q1", 2024): date(2024,  4, 12),
+    ("META",  "Q1", 2024): date(2024,  4, 24),
+    ("MSFT",  "Q1", 2024): date(2023, 10, 24),  # Q1 FY2024
+    ("AMZN",  "Q1", 2024): date(2024,  4, 30),
+    ("GOOGL", "Q1", 2024): date(2024,  4, 25),
+    ("C",     "Q1", 2024): date(2024,  4, 12),
+    ("DIS",   "Q1", 2024): date(2024,  2,  7),
+    ("WMT",   "Q1", 2025): date(2024,  5, 16),  # Q1 FY2025 reported May 2024
+    ("WMT",   "Q1", 2024): date(2024,  5, 16),  # alias if user enters calendar 2024
+    ("LLY",   "Q1", 2024): date(2024,  4, 30),
+    ("PG",    "Q1", 2024): date(2023, 10, 18),  # Q1 FY2024
+    ("UNH",   "Q1", 2024): date(2024,  4, 16),
+    ("AMT",   "Q1", 2024): date(2024,  4, 30),
+    ("BLK",   "Q1", 2024): date(2024,  4, 12),
+    ("LIN",   "Q1", 2024): date(2024,  5,  2),
+    ("NFLX",  "Q1", 2024): date(2024,  4, 18),
+    ("CAT",   "Q1", 2024): date(2024,  4, 25),
+    ("CRM",   "Q1", 2025): date(2024,  5, 29),  # Q1 FY2025 reported May 2024
+    ("CRM",   "Q1", 2024): date(2024,  5, 29),  # alias if user enters calendar 2024
+}
+
+
 def get_earnings_date(ticker, period, year):
     """
-    Get actual earnings announcement date via yfinance; falls back to
-    quarter-end approximation for calendar-year fiscal companies.
+    Get actual earnings announcement date.
+    1. Authoritative override map (verified IR dates).
+    2. yfinance earnings_dates.
+    3. Quarter-end approximation (calendar-year fiscal companies only).
     """
+    override = EARNINGS_DATE_OVERRIDES.get((ticker.upper(), period, int(year)))
+    if override is not None:
+        return override
+
     approx = {
         "Q1": date(year,     4, 25),
         "Q2": date(year,     7, 28),
