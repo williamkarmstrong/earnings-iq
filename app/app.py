@@ -273,7 +273,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
                 st.warning(f"Failed to fetch audio for {ticker} {period} {year}.")
                 status.text("Defaulting to transcript only mode.")
 
-               if not av_json:
+                if not av_json:
                     st.error(f"Could not retrieve transcript: {av_err}")
                     st.stop()
 
