@@ -87,7 +87,7 @@ with st.sidebar:
     with st.expander("Metrics guide"):
         st.markdown("""
 **MCI (0-100):** FinBERT 40% + Wav2Vec2 35% + Pause 15% + Pitch 10% *(full multimodal)*
-Low ≤52 · Medium 52–56 · High ≥56
+Low <65 · Medium 65–69.9 · High ≥70
 
 **MCI in peer table:** FinBERT text only for fair cross peer comparison
 
