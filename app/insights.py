@@ -1,7 +1,7 @@
 """
 Insight generation module.
 Turns raw multimodal scores into dashboard-ready signals and flags.
-Peer benchmarking uses mock data for the demo — will be replaced
+Peer benchmarking uses mock data for the demo - will be replaced
 with cached real call data in the next iteration.
 """
 
@@ -75,7 +75,7 @@ def generate_signal_flags(multimodal_result, hedge_data, prepared_sentiment, qa_
                       "message": f"Moderate tone-text divergence ({divergence:+.2f})",
                       "attribution": "Multimodal - full call"})
 
-    # Q&A sentiment decay — Price et al. (2012) identify this as highest-alpha split
+    # Q&A sentiment decay - Price et al. (2012) identify this as highest-alpha split
     if prepared_sentiment is not None and qa_sentiment is not None:
         decay = prepared_sentiment - qa_sentiment
         if decay > 0.20:
@@ -370,7 +370,7 @@ def get_peer_tickers(ticker):
 @st.cache_data(show_spinner=False)
 def generate_insights(multimodal_result, hedge_data, prepared_sentiment, qa_sentiment, ticker):
     """
-    Main entry point — assembles the full insights package that app.py consumes.
+    Main entry point - assembles the full insights package that app.py consumes.
     Returns a single dict with everything the dashboard needs.
     """
     mci        = multimodal_result.get("mci", 50)
