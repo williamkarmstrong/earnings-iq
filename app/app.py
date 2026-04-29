@@ -390,7 +390,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         _peer_tickers  = insights.get("peer_tickers", [])
         _live_text_mci = multimodal_result.get("text_mci", round(((overall_sentiment + 1) / 2) * 100, 1))
         _live_qa_stress = round(insights.get("qa_decay", 0.0), 3)
-        _live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci <= SIGNAL_MCI_WATCH else "Neutral"
+      _live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci < SIGNAL_MCI_WATCH else "Neutral"
 
         _peer_rows = []
         _rate_limited_peers = []
