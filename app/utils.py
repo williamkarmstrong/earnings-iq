@@ -10,7 +10,7 @@ from insights import SIGNAL_MCI_POSITIVE, SIGNAL_MCI_WATCH
 def _analyse_peer(peer_ticker, period, year):
     """
     Fetch and analyse a peer company's transcript for the given quarter.
-    Returns dict with mci, qa_stress, signal, failure_reason — or None on failure.
+    Returns dict with mci, qa_stress, signal, failure_reason - or None on failure.
     Cached 24h so repeat runs use local cache, not API credits.
     """
     try:
