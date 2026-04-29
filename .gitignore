@@ -2,7 +2,6 @@
 __pycache__/
 *.pyc
 .DS_Store
-cache/*
 !.gitkeep
 .streamlit/secrets.toml
 .devcontainer
