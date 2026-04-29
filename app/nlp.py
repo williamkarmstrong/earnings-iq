@@ -200,7 +200,7 @@ def analyse_transcript_text(transcript_text):
     """
     Quick multi-sample analysis of a raw transcript string for QoQ comparison.
     Samples 5 evenly-spaced windows of 1500 chars across the full transcript
-    and averages the FinBERT scores — avoids the boilerplate-truncation bias
+    and averages the FinBERT scores - avoids the boilerplate-truncation bias
     that occurs when only the opening 1500 chars (safe harbour / operator intro)
     are scored.
     Returns a dict with overall sentiment and hedging frequency.

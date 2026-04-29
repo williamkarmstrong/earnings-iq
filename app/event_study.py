@@ -9,8 +9,8 @@ Market proxy:      SPY (S&P 500 ETF)
 
 Sector Earnings Price Sensitivity: average |CAR[-1,+3]| across the last 3
 earnings events for 3 representative tickers per sector. This is an
-event-specific measure — how much the sector typically moves around earnings
-releases — distinct from general market beta. Cached for 24 hours.
+event-specific measure - how much the sector typically moves around earnings
+releases - distinct from general market beta. Cached for 24 hours.
 """
 
 import numpy as np
@@ -90,7 +90,7 @@ def compute_sector_betas():
     """
     Download 1 year of daily returns for all representative tickers and SPY.
     Compute OLS beta for each ticker vs SPY, average per sector.
-    Cached for 24 hours — betas are stable enough at daily frequency.
+    Cached for 24 hours - betas are stable enough at daily frequency.
     Returns dict: {sector_label: avg_beta}
     """
     all_tickers = list({t for tickers in _SECTOR_REPS.values() for t in tickers})
@@ -147,7 +147,7 @@ def _calendar_earnings_dates(today, n=3):
     Generate the last n approximate quarterly earnings dates before today.
     Uses standard US large-cap fiscal calendar:
       Q1 results → late April | Q2 → late July | Q3 → late October | Q4 → late January
-    No API calls — derived purely from the calendar.
+    No API calls - derived purely from the calendar.
     """
     candidates = []
     for yr in range(today.year - 3, today.year + 1):
@@ -220,7 +220,7 @@ def compute_sector_earnings_sensitivity():
     Distinct from general CAPM beta (which measures day-to-day co-movement).
 
     Earnings dates are derived from a quarterly calendar approximation
-    (Q1≈Apr 25, Q2≈Jul 28, Q3≈Oct 28, Q4≈Jan 28) — no per-ticker API
+    (Q1≈Apr 25, Q2≈Jul 28, Q3≈Oct 28, Q4≈Jan 28) - no per-ticker API
     calls needed. The approximation introduces ≤2 weeks of date error,
     which is negligible given the [-1,+3] event window.
 
@@ -257,7 +257,7 @@ def compute_sector_earnings_sensitivity():
     returns = np.log(close / close.shift(1)).dropna()
     returns.index = pd.to_datetime(returns.index)
 
-    # Calendar-derived earnings dates — same 3 dates used for every ticker.
+    # Calendar-derived earnings dates - same 3 dates used for every ticker.
     # Per-company date error is typically ≤14 trading days, which is within
     # the estimation gap (we exclude t=-20 to t=0, so ≤14-day misalignment
     # rarely contaminates the estimation window).
@@ -292,11 +292,51 @@ def compute_sector_earnings_sensitivity():
     return sector_results
 
 
+
+
+# Authoritative earnings call dates verified against company IR / press releases.
+# Override yfinance lookups, which are unreliable for fiscal-year companies
+# (AAPL, MSFT, V, DIS, PG, WMT, CRM) whose Q1 fiscal ≠ Q1 calendar.
+# Key: (TICKER, "QN", calendar_year_of_call) → call date.
+EARNINGS_DATE_OVERRIDES = {
+    ("TSLA",  "Q1", 2024): date(2024,  4, 23),
+    ("XOM",   "Q1", 2024): date(2024,  4, 26),
+    ("JNJ",   "Q1", 2024): date(2024,  4, 16),
+    ("V",     "Q1", 2024): date(2024,  1, 25),  # Q1 FY2024
+    ("AAPL",  "Q1", 2024): date(2024,  2,  1),  # Q1 FY2024
+    ("JPM",   "Q1", 2024): date(2024,  4, 12),
+    ("META",  "Q1", 2024): date(2024,  4, 24),
+    ("MSFT",  "Q1", 2024): date(2023, 10, 24),  # Q1 FY2024
+    ("AMZN",  "Q1", 2024): date(2024,  4, 30),
+    ("GOOGL", "Q1", 2024): date(2024,  4, 25),
+    ("C",     "Q1", 2024): date(2024,  4, 12),
+    ("DIS",   "Q1", 2024): date(2024,  2,  7),
+    ("WMT",   "Q1", 2025): date(2024,  5, 16),  # Q1 FY2025 reported May 2024
+    ("WMT",   "Q1", 2024): date(2024,  5, 16),  # alias if user enters calendar 2024
+    ("LLY",   "Q1", 2024): date(2024,  4, 30),
+    ("PG",    "Q1", 2024): date(2023, 10, 18),  # Q1 FY2024
+    ("UNH",   "Q1", 2024): date(2024,  4, 16),
+    ("AMT",   "Q1", 2024): date(2024,  4, 30),
+    ("BLK",   "Q1", 2024): date(2024,  4, 12),
+    ("LIN",   "Q1", 2024): date(2024,  5,  2),
+    ("NFLX",  "Q1", 2024): date(2024,  4, 18),
+    ("CAT",   "Q1", 2024): date(2024,  4, 25),
+    ("CRM",   "Q1", 2025): date(2024,  5, 29),  # Q1 FY2025 reported May 2024
+    ("CRM",   "Q1", 2024): date(2024,  5, 29),  # alias if user enters calendar 2024
+}
+
+
 def get_earnings_date(ticker, period, year):
     """
-    Get actual earnings announcement date via yfinance; falls back to
-    quarter-end approximation for calendar-year fiscal companies.
+    Get actual earnings announcement date.
+    1. Authoritative override map (verified IR dates).
+    2. yfinance earnings_dates.
+    3. Quarter-end approximation (calendar-year fiscal companies only).
     """
+    override = EARNINGS_DATE_OVERRIDES.get((ticker.upper(), period, int(year)))
+    if override is not None:
+        return override
+
     approx = {
         "Q1": date(year,     4, 25),
         "Q2": date(year,     7, 28),
@@ -336,7 +376,7 @@ def run_event_study(ticker, period, year):
     """
     event_date = get_earnings_date(ticker, period, year)
 
-    fetch_start = event_date - timedelta(days=185)
+    fetch_start = event_date - timedelta(days=220)
     fetch_end   = event_date + timedelta(days=15)
 
     try:
@@ -390,7 +430,7 @@ def run_event_study(ticker, period, year):
     ev_mask = (rel >= -1) & (rel <= 3)
     ev = returns[ev_mask].copy()
     if ev.empty:
-        return {"error": "Event window has no trading data — date may be in the future."}
+        return {"error": "Event window has no trading data - date may be in the future."}
 
     ev_rel = rel[ev_mask]
     ar     = ev[ticker] - (alpha + beta * ev["SPY"])
@@ -424,7 +464,7 @@ def run_event_study(ticker, period, year):
 def get_sector_sensitivity_df(eps_data, selected_sector_label=None, live_car=None):
     """
     Build the sector Earnings Price Sensitivity DataFrame for the chart.
-    eps_data: dict from compute_sector_earnings_sensitivity() — {sector: avg_abs_car}.
+    eps_data: dict from compute_sector_earnings_sensitivity() - {sector: avg_abs_car}.
               Falls back to _FALLBACK_EPS if empty.
     Patches selected_sector_label with the live ticker's |CAR| if provided.
     Returns DataFrame sorted ascending by eps (chart reads highest at top).

@@ -132,7 +132,7 @@ def extract_wav2vec2_features(audio_path, window_s=200.0, stride_s=100.0):
     """
     Extract Wav2Vec2 deep speech embeddings via a sliding window across the full call.
     50% overlap (stride = window/2 by default) smooths boundary effects on step norms.
-    Each window is loaded independently from disk — no full-file load.
+    Each window is loaded independently from disk - no full-file load.
     Returns a dict with confidence proxy and raw norm.
     """
     if not _wav2vec2_available:
@@ -178,7 +178,7 @@ def extract_wav2vec2_features(audio_path, window_s=200.0, stride_s=100.0):
 @st.cache_data(show_spinner=False)
 def extract_audio_features(audio_path):
     """
-    Main entry point — runs acoustic and Wav2Vec2 extraction.
+    Main entry point - runs acoustic and Wav2Vec2 extraction.
     Cached so re-runs on the same file are instant.
     """
     acoustic = extract_acoustic_features(audio_path)

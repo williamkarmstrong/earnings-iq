@@ -87,7 +87,7 @@ with st.sidebar:
     with st.expander("Metrics guide"):
         st.markdown("""
 **MCI (0-100):** FinBERT 40% + Wav2Vec2 35% + Pause 15% + Pitch 10% *(full multimodal)*
-Low ≤52 · Medium 52–56 · High ≥56
+Low <65 · Medium 65–69.9 · High ≥70
 
 **MCI in peer table:** FinBERT text only for fair cross peer comparison
 
@@ -143,7 +143,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
     es_result_cached  = None
 
     # 1. Fetch Transcript from Alpha Vantage for Backup and Speaker Mapping
-    # Skip in audio mode when a demo cache exists — av_turns/title_map come from cache instead.
+    # Skip in audio mode when a demo cache exists - av_turns/title_map come from cache instead.
     _demo_dir = f"demo/{ticker}_{year}_{period}"
     _demo_cache_exists = not transcript_only and os.path.isdir(_demo_dir) and os.path.exists(f"{_demo_dir}/results.json")
     if not _demo_cache_exists:
@@ -154,7 +154,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
             av_turns = []
             title_map = {}
 
-        # Pre-fetch previous quarter transcripts for QoQ now — the Whisper/Librosa
+        # Pre-fetch previous quarter transcripts for QoQ now - the Whisper/Librosa
         # processing below acts as a natural rate-limit gap before peers are fetched.
         status.text("Pre-fetching historical transcripts...")
         _prefetch_rate_limited = []
@@ -164,7 +164,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
                 _prefetch_rate_limited.append(f"{_pf_period} {_pf_year}")
         if _prefetch_rate_limited:
             pipeline_warnings.append(
-                f"API rate limit hit pre-fetching QoQ history — these quarters will show N/A: {', '.join(_prefetch_rate_limited)}"
+                f"API rate limit hit pre-fetching QoQ history - these quarters will show N/A: {', '.join(_prefetch_rate_limited)}"
             )
         status.empty()
     else:
@@ -175,6 +175,35 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         if not av_json:
             st.error(f"Could not load transcript: {av_err}")
             st.stop()
+
+        progress.progress(40)
+
+        # Build transcript_text and pseudo-segments from AV transcript.
+        # AV turns have no timestamps; synthesise sequential positions at ~150 wpm
+        # so QA-split, timeline, and speaker breakdown still function and the
+        # text component of MCI varies per call (was stuck at a fixed value).
+        transcript_text = " ".join((item.get("content", "") or "") for item in av_json)
+
+        pseudo_segments = []
+        _cursor = 0.0
+        for _item in av_json:
+            _text = (_item.get("content", "") or "").strip()
+            if not _text:
+                continue
+            _name  = _item.get("speaker", "Unknown") or "Unknown"
+            _title = _item.get("title", "") or ""
+            _speaker = f"{_name} ({_title})" if _title else _name
+            _dur = max(2.0, len(_text.split()) / 150.0 * 60.0)
+            pseudo_segments.append({
+                "start":   _cursor,
+                "end":     _cursor + _dur,
+                "text":    _text,
+                "speaker": _speaker,
+            })
+            _cursor += _dur
+
+        status.text("FinBERT sentiment analysis (transcript-only)...")
+        enriched_segments = analyse_segments(pseudo_segments)
 
         progress.progress(50)
         st.success("Transcript loaded (transcript only mode, audio analysis skipped).")
@@ -249,6 +278,30 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
                     st.stop()
 
                 transcript_only = True
+
+                # Same pseudo-segment build as the user-toggled transcript-only path 
+                # otherwise enriched_segments stays empty and MCI stuck at fixed value.
+                transcript_text = " ".join((item.get("content", "") or "") for item in av_json)
+                pseudo_segments = []
+                _cursor = 0.0
+                for _item in av_json:
+                    _text = (_item.get("content", "") or "").strip()
+                    if not _text:
+                        continue
+                    _name  = _item.get("speaker", "Unknown") or "Unknown"
+                    _title = _item.get("title", "") or ""
+                    _speaker = f"{_name} ({_title})" if _title else _name
+                    _dur = max(2.0, len(_text.split()) / 150.0 * 60.0)
+                    pseudo_segments.append({
+                        "start":   _cursor,
+                        "end":     _cursor + _dur,
+                        "text":    _text,
+                        "speaker": _speaker,
+                    })
+                    _cursor += _dur
+                status.text("FinBERT sentiment analysis (audio-fallback)...")
+                enriched_segments = analyse_segments(pseudo_segments)
+
                 audio_features = {
                     "confidence_proxy": 0.5,
                     "pause_ratio": 0.3,
@@ -390,7 +443,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         _peer_tickers  = insights.get("peer_tickers", [])
         _live_text_mci = multimodal_result.get("text_mci", round(((overall_sentiment + 1) / 2) * 100, 1))
         _live_qa_stress = round(insights.get("qa_decay", 0.0), 3)
-        _live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci <= SIGNAL_MCI_WATCH else "Neutral"
+        _live_signal = "Positive" if _live_text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if _live_text_mci < SIGNAL_MCI_WATCH else "Neutral"
 
         _peer_rows = []
         _rate_limited_peers = []
@@ -451,7 +504,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         status.empty()
         progress.empty()
 
-        # Event study — runs in parallel with dashboard render (cached after first run)
+        # Event study - runs in parallel with dashboard render (cached after first run)
         status.text("Running event study...")
         try:
             es_result = run_event_study(ticker, period, year)
@@ -702,13 +755,13 @@ if not timeline_df.empty:
             st.session_state.audio_autoplay  = True
 
     if not is_full_call:
-        st.caption(f"Short clip ({call_duration_min:.0f} min) — Q&A annotation requires ≥ 25 min.")
+        st.caption(f"Short clip ({call_duration_min:.0f} min) - Q&A annotation requires ≥ 25 min.")
 else:
     st.info("Sentiment trajectory requires audio mode with Whisper segments.")
 
 st.divider()
 
-# Audio player — placed here so chart event (above) and talking-point reruns
+# Audio player - placed here so chart event (above) and talking-point reruns
 # both land here with the correct state. Sentiment extremes buttons (below)
 # overwrite the slot directly in the same run without needing a rerun.
 _autoplay = st.session_state.get("audio_autoplay", False)
@@ -842,7 +895,7 @@ st.divider()
 # ================================================================
 # SECTION 6: SPEAKER ATTRIBUTION
 # ================================================================
-st.subheader("Speaker Attribution — Management MCI")
+st.subheader("Speaker Attribution - Management MCI")
 
 # Keep named management speakers; drop confirmed analysts/operators and
 # unresolved pyannote labels (SPEAKER_XX / UNKNOWN).
@@ -894,7 +947,7 @@ st.divider()
 # SECTION 7: PEER COMPARISON
 # ================================================================
 peer_sector = insights.get("peer_sector", "Peer Group")
-st.subheader(f"Peer Comparison — {peer_sector}")
+st.subheader(f"Peer Comparison - {peer_sector}")
 
 peer_df = insights.get("peer_data", pd.DataFrame())
 if not peer_df.empty and "is_selected" in peer_df.columns:
@@ -915,7 +968,7 @@ if not peer_df.empty and "is_selected" in peer_df.columns:
     _rate_lim = insights.get("peer_rate_limited", [])
     _no_tx    = insights.get("peer_no_transcript", [])
     if _rate_lim:
-        _caption_parts.append(f"API rate limit hit — retry later for: {', '.join(_rate_lim)}")
+        _caption_parts.append(f"API rate limit hit - retry later for: {', '.join(_rate_lim)}")
     if _no_tx:
         _caption_parts.append(f"No AV transcript available for: {', '.join(_no_tx)}")
     st.caption(" · ".join(_caption_parts))
@@ -927,8 +980,8 @@ st.divider()
 # ================================================================
 # SECTION 8: EVENT STUDY
 # ================================================================
-st.subheader("Event-Study Analysis — Earnings Sensitivity")
-st.caption("CAPM event study: estimation window t−90 to t−20 · event window t−1 to t+3 · market proxy: SPY")
+st.subheader("Event-Study Analysis - Earnings Sensitivity")
+st.caption("CAPM event study: estimation window t−120 to t−20 · event window t−1 to t+3 · market proxy: SPY")
 
 _es_col, _sec_col = st.columns([1.1, 1])
 
@@ -979,7 +1032,7 @@ with _es_col:
         )
 
 with _sec_col:
-    st.subheader("Earnings Price Sensitivity — Avg |CAR[−1,+3]|")
+    st.subheader("Earnings Price Sensitivity - Avg |CAR[−1,+3]|")
     _live_car          = es_result.get("car") if "error" not in es_result else None
     _peer_sector_label = insights.get("peer_sector")
     _eps_data          = compute_sector_earnings_sensitivity()
@@ -997,7 +1050,7 @@ with _sec_col:
                           annotation_text=_lbl, annotation_font_size=9)
     fig_sec.update_layout(
         height=520, margin=dict(l=0, r=40, t=10, b=0), showlegend=False,
-        xaxis=dict(title="Avg |CAR| — event window [−1, +3]",
+        xaxis=dict(title="Avg |CAR| - event window [−1, +3]",
                    range=[0, max(_sec_df["eps"]) * 1.25], tickformat=".0%"),
     )
     st.plotly_chart(fig_sec, use_container_width=True)
@@ -1032,9 +1085,9 @@ Charts requiring audio (trajectory, divergence, speaker attribution) show an inf
 when operating in transcript-only mode.
 """)
 
-with st.expander("Transcript analysis — how sentiment is measured", expanded=False):
+with st.expander("Transcript analysis - how sentiment is measured", expanded=False):
     st.markdown("""
-**Model**: [FinBERT](https://huggingface.co/ProsusAI/finbert) — a BERT model fine-tuned on
+**Model**: [FinBERT](https://huggingface.co/ProsusAI/finbert) - a BERT model fine-tuned on
 financial text (earnings call transcripts, SEC filings, financial news). It outperforms
 general purpose sentiment models on earnings call language because it understands
 domain specific phrases like "headwinds", "beat consensus", and "margin expansion".
@@ -1059,7 +1112,7 @@ Zero = neutral; +1 = maximally positive; −1 = maximally negative.
 Typical earnings calls land between +0.1 and +0.5.
 """)
 
-with st.expander("Audio analysis — Wav2Vec2 and acoustic features", expanded=False):
+with st.expander("Audio analysis - Wav2Vec2 and acoustic features", expanded=False):
     st.markdown("""
 **Transcription**: [OpenAI Whisper](https://github.com/openai/whisper) (base model)
 converts the audio to text with timestamps. It runs locally on CPU (or Apple MPS).
@@ -1072,11 +1125,11 @@ transcript. Analysts and IR representatives are filtered out; only named managem
 speakers (CEO, CFO, COO, etc.) contribute to MCI and sentiment scores.
 
 **Acoustic features** (librosa):
-- *Pitch mean & std* — sampled across start, middle, and end of the call. High pitch
+- *Pitch mean & std* - sampled across start, middle, and end of the call. High pitch
   coefficient of variation indicates vocal instability.
-- *Pause ratio* — frames where RMS energy drops below 20% of the call mean.
+- *Pause ratio* - frames where RMS energy drops below 20% of the call mean.
   Compressed audio from YouTube raises the noise floor, so 20% is used rather than 10%.
-- *Tempo* — speaking rate in BPM.
+- *Tempo* - speaking rate in BPM.
 
 **Wav2Vec2** ([facebook/wav2vec2-base-960h](https://huggingface.co/facebook/wav2vec2-base-960h)):
 A transformer trained on 960 hours of LibriSpeech speech. Three windows are sampled
@@ -1133,7 +1186,7 @@ because it is unscripted and analysts ask pointed questions.
 Threshold: >0.20 = high stress; >0.10 = moderate.
 """)
 
-with st.expander("Event study — Cumulative Abnormal Return (CAR)", expanded=False):
+with st.expander("Event study - Cumulative Abnormal Return (CAR)", expanded=False):
     st.markdown("""
 Methodology: CAPM event study following Brown & Warner (1985).
 
@@ -1149,7 +1202,7 @@ Cumulative abnormal return: `CAR = Σ AR_t`.
 deviation from the estimation window. Significant at 95% if |t| ≥ 1.96.
 
 **Market Beta (β)** shown in the metrics is the general CAPM beta from the estimation
-window — it measures normal day-to-day market sensitivity, not earnings-specific
+window - it measures normal day-to-day market sensitivity, not earnings-specific
 sensitivity. The earnings-specific measure is **CAR [−1,+3]**.
 
 **Earnings Price Sensitivity** chart shows the average |CAR[−1,+3]| across the last

@@ -1,21 +1,21 @@
 """
 Insight generation module.
 Turns raw multimodal scores into dashboard-ready signals and flags.
-Peer benchmarking uses mock data for the demo — will be replaced
+Peer benchmarking uses mock data for the demo - will be replaced
 with cached real call data in the next iteration.
 """
 
 import pandas as pd
 import streamlit as st
 
-# Signal thresholds: Low ≤52 | Medium 52–56 | High ≥56
-SIGNAL_MCI_POSITIVE = 56   # text_mci >= this → "Positive"
-SIGNAL_MCI_WATCH    = 52   # text_mci <= this → "Watch", else "Neutral"
+# Signal thresholds: Low <65 | Medium 65–69.9 | High ≥70
+SIGNAL_MCI_POSITIVE = 70   # text_mci >= this → "Positive"
+SIGNAL_MCI_WATCH    = 65   # text_mci <  this → "Watch", else "Neutral"
 
 MCI_THRESHOLDS = {
-    "High":   (56, 100),  # checked first — 56 resolves to High, not Medium
-    "Medium": (52,  56),  # 52 resolves to Medium, not Low
-    "Low":    (0,   52),
+    "High":   (70, 100),    # ≥70
+    "Medium": (65,  69.9),  # 65–69.9
+    "Low":    (0,   64.9),  # <65
 }
 
 DIVERGENCE_THRESHOLDS = {
@@ -52,11 +52,11 @@ def generate_signal_flags(multimodal_result, hedge_data, prepared_sentiment, qa_
     divergence = multimodal_result.get("tone_text_divergence", 0)
 
     # MCI flags
-    if mci < 52:
+    if mci < 65:
         flags.append({"severity": "high",
                       "message": f"Management confidence low at {mci}/100",
                       "attribution": "Composite score - full call"})
-    elif mci < 56:
+    elif mci < 70:
         flags.append({"severity": "medium",
                       "message": f"Management confidence moderate at {mci}/100",
                       "attribution": "Composite score - full call"})
@@ -75,7 +75,7 @@ def generate_signal_flags(multimodal_result, hedge_data, prepared_sentiment, qa_
                       "message": f"Moderate tone-text divergence ({divergence:+.2f})",
                       "attribution": "Multimodal - full call"})
 
-    # Q&A sentiment decay — Price et al. (2012) identify this as highest-alpha split
+    # Q&A sentiment decay - Price et al. (2012) identify this as highest-alpha split
     if prepared_sentiment is not None and qa_sentiment is not None:
         decay = prepared_sentiment - qa_sentiment
         if decay > 0.20:
@@ -370,7 +370,7 @@ def get_peer_tickers(ticker):
 @st.cache_data(show_spinner=False)
 def generate_insights(multimodal_result, hedge_data, prepared_sentiment, qa_sentiment, ticker):
     """
-    Main entry point — assembles the full insights package that app.py consumes.
+    Main entry point - assembles the full insights package that app.py consumes.
     Returns a single dict with everything the dashboard needs.
     """
     mci        = multimodal_result.get("mci", 50)
