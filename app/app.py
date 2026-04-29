@@ -981,7 +981,7 @@ st.divider()
 # SECTION 8: EVENT STUDY
 # ================================================================
 st.subheader("Event-Study Analysis — Earnings Sensitivity")
-st.caption("CAPM event study: estimation window t−90 to t−20 · event window t−1 to t+3 · market proxy: SPY")
+st.caption("CAPM event study: estimation window t−120 to t−20 · event window t−1 to t+3 · market proxy: SPY")
 
 _es_col, _sec_col = st.columns([1.1, 1])
 
