@@ -171,10 +171,39 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         av_json, av_err = None, None
 
     # 2. Transcript Only Mode: Check Transcript Exists
-    if transcript_only:
+ if transcript_only:
         if not av_json:
             st.error(f"Could not load transcript: {av_err}")
             st.stop()
+
+        progress.progress(40)
+
+        # Build transcript_text and pseudo-segments from AV transcript.
+        # AV turns have no timestamps; synthesise sequential positions at ~150 wpm
+        # so QA-split, timeline, and speaker breakdown still function and the
+        # text component of MCI varies per call (was stuck at 0.5 → MCI=56).
+        transcript_text = " ".join((item.get("content", "") or "") for item in av_json)
+
+        pseudo_segments = []
+        _cursor = 0.0
+        for _item in av_json:
+            _text = (_item.get("content", "") or "").strip()
+            if not _text:
+                continue
+            _name  = _item.get("speaker", "Unknown") or "Unknown"
+            _title = _item.get("title", "") or ""
+            _speaker = f"{_name} ({_title})" if _title else _name
+            _dur = max(2.0, len(_text.split()) / 150.0 * 60.0)
+            pseudo_segments.append({
+                "start":   _cursor,
+                "end":     _cursor + _dur,
+                "text":    _text,
+                "speaker": _speaker,
+            })
+            _cursor += _dur
+
+        status.text("FinBERT sentiment analysis (transcript-only)...")
+        enriched_segments = analyse_segments(pseudo_segments)
 
         progress.progress(50)
         st.success("Transcript loaded (transcript only mode, audio analysis skipped).")
