@@ -205,9 +205,9 @@ def is_management_speaker(name):
     None for unresolved or ambiguous speakers (no title information).
     """
     if not name or name in ("UNKNOWN", "") or name.upper().startswith("SPEAKER_"):
-        return None  # unresolved pyannote label — ambiguous
+        return None  # unresolved pyannote label - ambiguous
     if "(" not in name:
-        return None  # resolved name but no title — ambiguous, don't exclude
+        return None  # resolved name but no title - ambiguous, don't exclude
 
     title = name.split("(")[-1].split(")")[0].lower()
 
@@ -218,7 +218,7 @@ def is_management_speaker(name):
     if any(m in title for m in exec_markers):
         return True
 
-    return None  # title present but unrecognised — ambiguous
+    return None  # title present but unrecognised - ambiguous
 
 @st.cache_data(show_spinner=False)
 def tokenize_audio_text(text):
