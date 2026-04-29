@@ -181,7 +181,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         # Build transcript_text and pseudo-segments from AV transcript.
         # AV turns have no timestamps; synthesise sequential positions at ~150 wpm
         # so QA-split, timeline, and speaker breakdown still function and the
-        # text component of MCI varies per call (was stuck at 0.5 → MCI=56).
+        # text component of MCI varies per call (was stuck at a fixed value).
         transcript_text = " ".join((item.get("content", "") or "") for item in av_json)
 
         pseudo_segments = []
@@ -280,7 +280,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
                 transcript_only = True
 
                 # Same pseudo-segment build as the user-toggled transcript-only path 
-                # otherwise enriched_segments stays empty and MCI collapses to 56.0.
+                # otherwise enriched_segments stays empty and MCI stuck at fixed value.
                 transcript_text = " ".join((item.get("content", "") or "") for item in av_json)
                 pseudo_segments = []
                 _cursor = 0.0
