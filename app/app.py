@@ -273,11 +273,35 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
                 st.warning(f"Failed to fetch audio for {ticker} {period} {year}.")
                 status.text("Defaulting to transcript only mode.")
 
-                if not av_json:
+               if not av_json:
                     st.error(f"Could not retrieve transcript: {av_err}")
                     st.stop()
 
                 transcript_only = True
+
+                # Same pseudo-segment build as the user-toggled transcript-only path —
+                # otherwise enriched_segments stays empty and MCI collapses to 56.0.
+                transcript_text = " ".join((item.get("content", "") or "") for item in av_json)
+                pseudo_segments = []
+                _cursor = 0.0
+                for _item in av_json:
+                    _text = (_item.get("content", "") or "").strip()
+                    if not _text:
+                        continue
+                    _name  = _item.get("speaker", "Unknown") or "Unknown"
+                    _title = _item.get("title", "") or ""
+                    _speaker = f"{_name} ({_title})" if _title else _name
+                    _dur = max(2.0, len(_text.split()) / 150.0 * 60.0)
+                    pseudo_segments.append({
+                        "start":   _cursor,
+                        "end":     _cursor + _dur,
+                        "text":    _text,
+                        "speaker": _speaker,
+                    })
+                    _cursor += _dur
+                status.text("FinBERT sentiment analysis (audio-fallback)...")
+                enriched_segments = analyse_segments(pseudo_segments)
+
                 audio_features = {
                     "confidence_proxy": 0.5,
                     "pause_ratio": 0.3,
