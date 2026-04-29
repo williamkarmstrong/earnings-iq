@@ -4,7 +4,7 @@ Fuses text sentiment (FinBERT) with audio features (librosa + Wav2Vec2)
 to produce the divergence scores shown in the dashboard.
 
 The core insight: when acoustic confidence diverges from textual sentiment,
-it signals that management delivery does not match their words —
+it signals that management delivery does not match their words -
 a pattern Hajek & Munk (2023) show has predictive value for financial outcomes.
 """
 
@@ -39,7 +39,7 @@ import streamlit as st
 
 def compute_text_mci(sentiment_score):
     """
-    Text-only MCI — FinBERT sentiment mapped to [0, 100].
+    Text-only MCI - FinBERT sentiment mapped to [0, 100].
     Used for peer comparison so all values are on the same basis
     (illustrative peer MCIs are text-derived; mixing in audio for the
     selected ticker creates an apples-to-oranges comparison).
@@ -49,12 +49,12 @@ def compute_text_mci(sentiment_score):
 
 def compute_mci(sentiment_score, audio_features):
     """
-    Management Confidence Index — composite 0-100 score.
+    Management Confidence Index - composite 0-100 score.
     Weighted combination of:
-      - FinBERT net sentiment (40%) — what is said
-      - Wav2Vec2 confidence proxy (35%) — how it is delivered
-      - Pause ratio inverted (15%) — hesitation penalty
-      - Pitch stability inverted (10%) — vocal steadiness
+      - FinBERT net sentiment (40%) - what is said
+      - Wav2Vec2 confidence proxy (35%) - how it is delivered
+      - Pause ratio inverted (15%) - hesitation penalty
+      - Pitch stability inverted (10%) - vocal steadiness
     Weights reflect Chen et al. (2023): audio adds incremental value
     beyond text but text remains the primary signal.
     """
@@ -82,10 +82,10 @@ def compute_mci(sentiment_score, audio_features):
 
 def compute_tone_text_divergence(sentiment_score, audio_features):
     """
-    Tone-text divergence — the key proprietary signal.
+    Tone-text divergence - the key proprietary signal.
     Measures the gap between what is said (FinBERT) and how it is delivered
     (Wav2Vec2). Negative values mean acoustic confidence is below textual
-    sentiment — indicating scripted positivity masking genuine hesitation.
+    sentiment - indicating scripted positivity masking genuine hesitation.
     Score range approximately [-1, +1].
     """
     text_normalised     = (sentiment_score + 1) / 2
@@ -209,7 +209,7 @@ def compute_speaker_mci(enriched_segments, audio_features, qa_start_time=None):
 @st.cache_data(show_spinner=False)
 def analyse_multimodal(text_sentiment, audio_features, enriched_segments=None, qa_start_time=None):
     """
-    Main entry point — runs all multimodal computations and returns
+    Main entry point - runs all multimodal computations and returns
     a single result dict that insights.py and app.py consume.
     qa_start_time: actual Q&A start in seconds from find_qa_start_time().
     Pass this so all section splits use the real transition time, not 65%.
