@@ -52,11 +52,11 @@ def generate_signal_flags(multimodal_result, hedge_data, prepared_sentiment, qa_
     divergence = multimodal_result.get("tone_text_divergence", 0)
 
     # MCI flags
-    if mci < 52:
+    if mci < 65:
         flags.append({"severity": "high",
                       "message": f"Management confidence low at {mci}/100",
                       "attribution": "Composite score - full call"})
-    elif mci < 56:
+    elif mci < 70:
         flags.append({"severity": "medium",
                       "message": f"Management confidence moderate at {mci}/100",
                       "attribution": "Composite score - full call"})
