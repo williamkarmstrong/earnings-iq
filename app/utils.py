@@ -27,7 +27,7 @@ def _analyse_peer(peer_ticker, period, year):
         stats     = analyse_transcript_text(text)
         text_mci  = round(((stats["sentiment"] + 1) / 2) * 100, 1)
         qa_stress = compute_text_qa_stress(turns)
-     signal    = "Positive" if text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if text_mci < SIGNAL_MCI_WATCH else "Neutral"
+        signal    = "Positive" if text_mci >= SIGNAL_MCI_POSITIVE else "Watch" if text_mci < SIGNAL_MCI_WATCH else "Neutral"
         return {"mci": text_mci, "qa_stress": qa_stress, "signal": signal}
     except Exception:
         return {"failure_reason": "error"}
