@@ -8,14 +8,14 @@ with cached real call data in the next iteration.
 import pandas as pd
 import streamlit as st
 
-# Signal thresholds: Low ≤52 | Medium 52–56 | High ≥56
-SIGNAL_MCI_POSITIVE = 56   # text_mci >= this → "Positive"
-SIGNAL_MCI_WATCH    = 52   # text_mci <= this → "Watch", else "Neutral"
+# Signal thresholds: Low <65 | Medium 65–69.9 | High ≥70
+SIGNAL_MCI_POSITIVE = 70   # text_mci >= this → "Positive"
+SIGNAL_MCI_WATCH    = 65   # text_mci <  this → "Watch", else "Neutral"
 
 MCI_THRESHOLDS = {
-    "High":   (56, 100),  # checked first — 56 resolves to High, not Medium
-    "Medium": (52,  56),  # 52 resolves to Medium, not Low
-    "Low":    (0,   52),
+    "High":   (70, 100),    # ≥70
+    "Medium": (65,  69.9),  # 65–69.9
+    "Low":    (0,   64.9),  # <65
 }
 
 DIVERGENCE_THRESHOLDS = {
