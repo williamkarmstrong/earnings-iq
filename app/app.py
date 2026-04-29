@@ -171,7 +171,7 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         av_json, av_err = None, None
 
     # 2. Transcript Only Mode: Check Transcript Exists
- if transcript_only:
+    if transcript_only:
         if not av_json:
             st.error(f"Could not load transcript: {av_err}")
             st.stop()
