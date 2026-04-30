@@ -308,7 +308,7 @@ EARNINGS_DATE_OVERRIDES = {
     ("META",  "Q1", 2024): date(2024,  4, 24),
     ("MSFT",  "Q1", 2024): date(2023, 10, 24),  # Q1 FY2024
     ("AMZN",  "Q1", 2024): date(2024,  4, 30),
-    ("GOOGL", "Q1", 2024): date(2024,  4, 25),
+    ("GOOG", "Q1", 2024): date(2024,  4, 25),
     ("C",     "Q1", 2024): date(2024,  4, 12),
     ("DIS",   "Q1", 2024): date(2024,  2,  7),
     ("WMT",   "Q1", 2025): date(2024,  5, 16),  # Q1 FY2025 reported May 2024
