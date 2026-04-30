@@ -59,10 +59,10 @@ with st.sidebar:
     st.caption("CFA AI Investment Challenge")
     st.divider()
 
-    ticker = st.text_input("Ticker", "AAPL").upper()
+    ticker = st.text_input("Ticker", "GOOG").upper()
     col_p, col_y = st.columns(2)
     period = col_p.selectbox("Quarter", ["Q1", "Q2", "Q3", "Q4"])
-    year = st.slider("Year", 2011, 2026, 2018)
+    year = st.slider("Year", 2011, 2026, 2024)
 
     transcript_only = st.toggle(
         "Transcript-only mode",
@@ -513,8 +513,9 @@ def run_pipeline(ticker: str, period: str, year: int, transcript_only: bool) -> 
         status.empty()
 
         # SAVE ALL NATIVE AND OFFLINE CACHING
-        if demo_mode and enriched_segments:
+        if enriched_segments:
             try:
+                os.makedirs(demo_dir, exist_ok=True)
                 _es_serial = es_result.copy()
                 if "ar_series" in _es_serial and isinstance(_es_serial["ar_series"], pd.DataFrame):
                     _es_serial["ar_series"] = _es_serial["ar_series"].to_dict("records")
