@@ -32,15 +32,20 @@ def _analyse_peer(peer_ticker, period, year):
     except Exception:
         return {"failure_reason": "error"}
 
-@st.cache_data
+@st.cache_data(ttl=3600, show_spinner=False)
 def is_valid_ticker(ticker):
-    """Quick yfinance check to catch typos before running the pipeline."""
+    """
+    Return True if ticker is recognised by yfinance.
+
+    fast_info.quote_type is None for some valid share classes (e.g. GOOG
+    Class C) so we always fall back to a short price history check.
+    TTL=1h prevents a stale False result from being cached across sessions.
+    """
     try:
         t = yf.Ticker(ticker)
-        # fast_info is a lightweight non-historical call; quote_type is None only for unrecognised symbols
         if t.fast_info.quote_type is not None:
             return True
-        # Fallback: 5d window avoids false negatives on weekends/holidays
+        # 5-day window catches weekends/holidays; non-empty = valid symbol
         return not t.history(period="5d").empty
     except Exception:
         return False

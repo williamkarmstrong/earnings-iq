@@ -23,6 +23,53 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
+# ============================================================
+# DEMO MODE
+# ============================================================
+# When DEMO_MODE = True the app restricts users to a fixed set
+# of pre-processed calls stored in the demo/ directory.
+#
+# Use this when sharing the tool publicly:
+#   - Results load instantly from demo/TICKER_YEAR_PERIOD/results.json
+#   - No live API calls or Alpha Vantage credits are consumed
+#   - The ticker text box is replaced by a dropdown so users
+#     cannot enter arbitrary symbols
+#
+# To re-enable free ticker entry (development / private use),
+# set DEMO_MODE = False.  All other behaviour is unchanged.
+DEMO_MODE = True
+
+
+def get_available_demos():
+    """
+    Scan demo/ for pre-processed result caches.
+    Only directories containing results.json are included.
+    Returns list of dicts: {ticker, year, period, label, key}.
+    """
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    demo_root = os.path.join(project_root, "demo")
+    demos = []
+    if not os.path.isdir(demo_root):
+        return demos
+    for name in sorted(os.listdir(demo_root)):
+        if not os.path.isfile(os.path.join(demo_root, name, "results.json")):
+            continue
+        parts = name.split("_")  # expects TICKER_YEAR_PERIOD
+        if len(parts) != 3:
+            continue
+        try:
+            demos.append({
+                "ticker": parts[0],
+                "year":   int(parts[1]),
+                "period": parts[2],
+                "label":  f"{parts[0]}  ·  {parts[2]} {parts[1]}",
+                "key":    name,
+            })
+        except ValueError:
+            pass
+    return demos
+
+
 from ingestion import fetch_audio, fetch_transcript
 from event_study import run_event_study, get_sector_sensitivity_df, compute_sector_earnings_sensitivity
 from speech import transcribe_audio, map_speakers, resolve_speaker_names, is_management_speaker
@@ -59,21 +106,41 @@ with st.sidebar:
     st.caption("CFA AI Investment Challenge")
     st.divider()
 
-    ticker = st.text_input("Ticker", "GOOG").upper()
-    col_p, col_y = st.columns(2)
-    period = col_p.selectbox("Quarter", ["Q1", "Q2", "Q3", "Q4"])
-    year = st.slider("Year", 2011, 2026, 2024)
-
-    transcript_only = st.toggle(
-        "Transcript-only mode",
-        value=False,
-        help="ON: skips audio (Whisper/Wav2Vec2/librosa) uses Alpha Vantage transcript only. "
-             "Faster for UI testing. OFF (default): full multimodal pipeline.",
-    )
-    if transcript_only:
-        st.caption("Mode: Transcript only")
+    if DEMO_MODE:
+        # --------------------------------------------------------
+        # Demo mode: restrict selection to pre-processed calls only
+        # --------------------------------------------------------
+        _demos = get_available_demos()
+        if not _demos:
+            st.error("No demo calls found in demo/ directory.")
+            st.stop()
+        _demo_labels = [d["label"] for d in _demos]
+        _selected_label = st.selectbox("Select Earnings Call", _demo_labels)
+        _selected = next(d for d in _demos if d["label"] == _selected_label)
+        ticker = _selected["ticker"]
+        period = _selected["period"]
+        year   = _selected["year"]
+        transcript_only = False  # demo cache always uses full multimodal results
+        st.caption(f"Demo mode  ·  {len(_demos)} pre-processed call(s)")
     else:
-        st.caption("Mode: Audio + Text (default)")
+        # --------------------------------------------------------
+        # Live mode: free ticker entry with full pipeline access
+        # --------------------------------------------------------
+        ticker = st.text_input("Ticker", "GOOG").upper()
+        col_p, col_y = st.columns(2)
+        period = col_p.selectbox("Quarter", ["Q1", "Q2", "Q3", "Q4"])
+        year = st.slider("Year", 2011, 2026, 2024)
+
+        transcript_only = st.toggle(
+            "Transcript-only mode",
+            value=False,
+            help="ON: skips audio (Whisper/Wav2Vec2/librosa) uses Alpha Vantage transcript only. "
+                 "Faster for UI testing. OFF (default): full multimodal pipeline.",
+        )
+        if transcript_only:
+            st.caption("Mode: Transcript only")
+        else:
+            st.caption("Mode: Audio + Text (default)")
 
     if st.button("Analyse Call", use_container_width=True, type="primary"):
         st.session_state.analysis_run = True
@@ -109,7 +176,10 @@ if not st.session_state.get("analysis_run", False):
     st.info("Select a ticker and quarter in the sidebar, then click **Analyse Call**.")
     st.stop()
 
-if not is_valid_ticker(ticker):
+# In demo mode the selectbox guarantees a valid ticker, so skip
+# the yfinance lookup (which can mis-classify valid tickers such
+# as GOOG when fast_info.quote_type returns None).
+if not DEMO_MODE and not is_valid_ticker(ticker):
     st.error(f"'{ticker}' is not a recognised ticker.")
     st.stop()
 
